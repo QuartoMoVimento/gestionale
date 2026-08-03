@@ -421,10 +421,6 @@
     );
   }
 
-  function schoolName() {
-    return state.data?.settings?.school_name || "Studio Quarto MoVimento";
-  }
-
   const LABELS = {
     plan: {
       monthly: "Mensile",
@@ -786,13 +782,26 @@
     modalReturnFocus = null;
   }
 
-  function brandLockup(compact) {
+  function brandLockup(variant = "sidebar") {
+    const areaLabel = state.data
+      ? state.role === ROLE_ADMIN
+        ? "Area amministrativa"
+        : "Area famiglie"
+      : "Area corsi";
+    if (variant === "full") {
+      return `
+        <span class="brand-lockup brand-lockup--full">
+          <img class="brand-lockup__full-logo" src="assets/img/logo-quarto-movimento-full.png" alt="Quarto MoVimento" />
+          <span class="brand-lockup__label">${escapeHTML(areaLabel)}</span>
+        </span>
+      `;
+    }
     return `
-      <span class="brand-lockup${compact ? " mobile-brand" : ""}">
-        <span class="brand-mark" aria-hidden="true"><span>Q</span><span>M</span></span>
+      <span class="brand-lockup${variant === "compact" ? " mobile-brand" : ""}">
+        <img class="brand-mark" src="assets/img/logo-quarto-movimento.png" alt="" aria-hidden="true" />
         <span class="brand-lockup__text">
           <span class="brand-lockup__name">Quarto MoVimento</span>
-          <span class="brand-lockup__label">${escapeHTML(state.data ? schoolName() : "Area corsi")}</span>
+          <span class="brand-lockup__label">${escapeHTML(areaLabel)}</span>
         </span>
       </span>
     `;
@@ -1738,7 +1747,7 @@
     appRoot.innerHTML = `
       <main class="login-page" id="main-content">
         <section class="login-panel">
-          ${brandLockup(false)}
+          ${brandLockup("full")}
           <div class="login-panel__content">
             <span class="login-eyebrow">Area riservata</span>
             <h1 class="login-title">Bentornata!</h1>
@@ -1885,7 +1894,7 @@
     appRoot.innerHTML = `
       <div class="app-shell">
         <aside class="sidebar">
-          ${brandLockup(false)}
+          ${brandLockup("sidebar")}
           <p class="sidebar-section-label">${state.role === ROLE_ADMIN ? "Gestione scuola" : "La tua area"}</p>
           <nav class="sidebar-nav" aria-label="Navigazione principale">
             ${nav.map((item) => navLink(item, prefix, route)).join("")}
@@ -1914,7 +1923,7 @@
         </aside>
         <div class="app-main">
           <header class="topbar">
-            ${brandLockup(true)}
+            ${brandLockup("compact")}
             <div class="breadcrumbs">
               <span>${state.role === ROLE_ADMIN ? "Gestione scuola" : "Area famiglia"}</span>
               ${icon("chevronRight", 14)}

@@ -11,8 +11,8 @@
         form-action 'self' https://*.paypal.com;
         manifest-src 'self';
         script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
-        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
-        font-src 'self' data: https://fonts.gstatic.com https://*.paypalobjects.com;
+        style-src 'self' 'unsafe-inline' https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        font-src 'self' data: https://*.paypalobjects.com;
         img-src 'self' data: https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
         connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
         child-src 'self' https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
@@ -29,24 +29,30 @@
     />
     <title>Area corsi · Quarto MoVimento</title>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=Rochester&display=swap"
-      rel="stylesheet"
+      rel="icon"
+      href="assets/img/logo-quarto-movimento.png"
+      type="image/png"
+      sizes="512x512"
     />
-    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link
+      rel="apple-touch-icon"
+      href="assets/img/logo-quarto-movimento-192.png"
+    />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="stylesheet" href="assets/css/styles.css" />
   </head>
   <body>
     <a class="skip-link" href="#main-content">Vai al contenuto</a>
 
-    <div id="app" aria-live="polite">
+    <div id="app">
       <div class="app-loader" role="status">
-        <span class="brand-mark brand-mark--loader" aria-hidden="true">
-          <span>Q</span><span>M</span>
-        </span>
+        <img
+          class="brand-mark brand-mark--loader"
+          src="assets/img/logo-quarto-movimento.png"
+          alt=""
+          aria-hidden="true"
+        />
         <p>Accordiamo tutto…</p>
       </div>
     </div>

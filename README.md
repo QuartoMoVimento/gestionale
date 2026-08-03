@@ -417,10 +417,11 @@ contenuto restituito dal CDN non corrisponde ai byte verificati. Non sostituire
 il percorso con l'alias dinamico `.min.js` senza ricalcolare e collaudare
 l'integrità.
 
-PayPal e il foglio CSS di Google Fonts non usano SRI: il PayPal JavaScript SDK
-è una risposta dinamica legata ai parametri del merchant e Google Fonts può
-restituire CSS diverso in base al browser. La CSP ne limita comunque le origini.
-PayPal raccomanda `'unsafe-inline'` per la modalità senza nonce; anche
+Rochester e Nunito sono inclusi localmente in `assets/fonts`, insieme ai logo
+ufficiali in `assets/img`: il browser non contatta Google Fonts o il sito
+pubblico per caricarli. Il PayPal JavaScript SDK non usa SRI perché è una
+risposta dinamica legata ai parametri del merchant; la CSP ne limita comunque
+le origini. PayPal raccomanda `'unsafe-inline'` per la modalità senza nonce; anche
 l'interfaccia attuale contiene stili inline. Questo rende la CSP meno forte
 contro alcune forme di XSS, pur mantenendo attivi gli altri limiti sulle
 origini. Un nonce statico non risolverebbe il problema: per essere efficace
@@ -459,9 +460,8 @@ produzione far verificare il trattamento a un professionista competente.
   procedura per accesso/rettifica/cancellazione/esportazione e gestione delle
   violazioni.
 - Elencare correttamente i fornitori e i ruoli privacy: Supabase, GitHub,
-  PayPal, Google Fonts e il CDN jsDelivr finché font e librerie vengono caricati
-  da server esterni; valutare DPA, sub-responsabili e localizzazione dei dati,
-  oppure ospitare questi asset localmente.
+  PayPal e il CDN jsDelivr; valutare DPA, sub-responsabili e localizzazione dei
+  dati. Logo e font sono già ospitati localmente dal gestionale.
 - Proteggere l'account admin con password unica e MFA; non condividere un solo
   account tra più persone.
 - Verificare RLS con almeno due famiglie test: ciascuna deve vedere
