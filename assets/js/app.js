@@ -678,8 +678,17 @@
 
   function studentAttendanceStats(studentId) {
     if (!state.data) return { present: 0, absent: 0, total: 0, rate: 0 };
+    const countableLessonIds = new Set(
+      state.data.lessons
+        .filter(
+          (lesson) => !String(lesson.status).startsWith("cancelled"),
+        )
+        .map((lesson) => lesson.id),
+    );
     const rows = state.data.attendance.filter(
-      (item) => item.student_id === studentId,
+      (item) =>
+        item.student_id === studentId &&
+        countableLessonIds.has(item.lesson_id),
     );
     const present = rows.filter((item) => item.status === "present").length;
     const absent = rows.filter((item) =>
@@ -3302,7 +3311,16 @@
                 ? `<div class="activity-list">${past
                     .map((lesson) => {
                       const record = attendanceFor(lesson.id, student.id);
-                      return `<div class="activity-item"><span class="activity-icon">${icon(record?.status === "present" ? "checkSimple" : "calendar", 15)}</span><span class="activity-copy"><strong>${escapeHTML(formatDate(lesson.starts_at))}</strong><span>${escapeHTML(record ? LABELS.attendance[record.status] : LABELS.lessonStatus[lesson.status] || "Da aggiornare")}</span></span></div>`;
+                      const isCancelled = String(lesson.status).startsWith(
+                        "cancelled",
+                      );
+                      const result = isCancelled
+                        ? LABELS.lessonStatus[lesson.status]
+                        : record
+                          ? LABELS.attendance[record.status]
+                          : LABELS.lessonStatus[lesson.status] ||
+                            "Da aggiornare";
+                      return `<div class="activity-item"><span class="activity-icon">${icon(!isCancelled && record?.status === "present" ? "checkSimple" : "calendar", 15)}</span><span class="activity-copy"><strong>${escapeHTML(formatDate(lesson.starts_at))}</strong><span>${escapeHTML(result)}</span></span></div>`;
                     })
                     .join("")}</div>`
                 : `<p class="muted" style="font-size:12px">Nessuna lezione trascorsa.</p>`
@@ -3324,7 +3342,11 @@
           (item) => item.id === record.lesson_id,
         ),
       }))
-      .filter((item) => item.lesson)
+      .filter(
+        (item) =>
+          item.lesson &&
+          !String(item.lesson.status).startsWith("cancelled"),
+      )
       .sort(
         (a, b) =>
           new Date(b.lesson.starts_at) - new Date(a.lesson.starts_at),
@@ -4227,8 +4249,8 @@
       className: "modal--sm",
       body: `
         <form id="set-password-form">
-          <div class="field"><label for="new-password">Nuova password</label><input class="input" id="new-password" name="password" type="password" autocomplete="new-password" minlength="10" required /><p class="field-hint">Almeno 10 caratteri.</p></div>
-          <div class="field" style="margin-top:14px"><label for="new-password-confirm">Ripeti la password</label><input class="input" id="new-password-confirm" name="confirm_password" type="password" autocomplete="new-password" minlength="10" required /></div>
+          <div class="field"><label for="new-password">Nuova password</label><input class="input" id="new-password" name="password" type="password" autocomplete="new-password" minlength="12" required /><p class="field-hint">Almeno 12 caratteri, con maiuscola, minuscola, numero e simbolo.</p></div>
+          <div class="field" style="margin-top:14px"><label for="new-password-confirm">Ripeti la password</label><input class="input" id="new-password-confirm" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required /></div>
         </form>
       `,
       footer: `<button class="btn btn--primary" style="width:100%" type="submit" form="set-password-form">Salva password e continua</button>`,
@@ -5196,8 +5218,18 @@
         if (values.password !== values.confirm_password) {
           throw new Error("Le due password non coincidono.");
         }
-        if (String(values.password || "").length < 10) {
-          throw new Error("Usa almeno 10 caratteri.");
+        if (String(values.password || "").length < 12) {
+          throw new Error("Usa almeno 12 caratteri.");
+        }
+        if (
+          !/[a-z]/.test(values.password) ||
+          !/[A-Z]/.test(values.password) ||
+          !/[0-9]/.test(values.password) ||
+          !/[^A-Za-z0-9]/.test(values.password)
+        ) {
+          throw new Error(
+            "Inserisci almeno una maiuscola, una minuscola, un numero e un simbolo.",
+          );
         }
         const { error } = await state.supabase.auth.updateUser({
           password: values.password,
