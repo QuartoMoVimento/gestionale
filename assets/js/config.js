@@ -1,14 +1,14 @@
 /*
  * Configurazione pubblica del frontend.
  *
- * Il workflow GitHub Pages sostituisce questo file durante la pubblicazione
- * usando le variabili del repository. La chiave qui prevista è esclusivamente
- * la publishable/anon key di Supabase: non inserire mai service_role key,
- * PayPal secret, IBAN o altre credenziali private in questo file.
+ * URL e publishable key Supabase sono valori pubblici destinati al browser.
+ * Il workflow GitHub Pages può sostituirli con le variabili del repository.
+ * Non inserire mai service_role key, PayPal secret, IBAN o altre credenziali
+ * private in questo file.
  */
 window.QM_CONFIG = {
-  supabaseUrl: "",
-  supabaseAnonKey: "",
+  supabaseUrl: "https://uexwvbrvqphlcwxpgrku.supabase.co",
+  supabaseAnonKey: "sb_publishable_1p7YJp6v12m7GCBnMFr0GQ_1ru0BrwR",
   paypalClientId: "",
   paypalCurrency: "EUR",
   paypalEnvironment: "sandbox",

@@ -42,47 +42,95 @@ jobs:
       - name: Genera la configurazione pubblica
         shell: bash
         env:
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          SUPABASE_URL_OVERRIDE: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY_OVERRIDE: ${{ vars.SUPABASE_ANON_KEY }}
           PAYPAL_CLIENT_ID: ${{ vars.PAYPAL_CLIENT_ID }}
           PAYPAL_ENVIRONMENT: ${{ vars.PAYPAL_ENVIRONMENT }}
         run: |
           set -euo pipefail
           node <<'NODE'
           const fs = require("node:fs");
+          const vm = require("node:vm");
 
-          const supabaseUrl = (process.env.SUPABASE_URL || "").trim();
-          const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || "").trim();
-          const paypalClientId = (process.env.PAYPAL_CLIENT_ID || "").trim();
-          const paypalEnvironment =
-            (process.env.PAYPAL_ENVIRONMENT || "sandbox").trim().toLowerCase();
-
-          const supabaseValues = [supabaseUrl, supabaseAnonKey].filter(Boolean);
-          if (supabaseValues.length === 1) {
+          const configPath = "_site/assets/js/config.js";
+          const sandbox = { window: Object.create(null) };
+          const context = vm.createContext(sandbox, {
+            codeGeneration: { strings: false, wasm: false },
+          });
+          const source = fs.readFileSync(configPath, "utf8");
+          new vm.Script(source, { filename: configPath }).runInContext(context, {
+            timeout: 1000,
+          });
+          const versionedConfig = sandbox.window.QM_CONFIG;
+          if (!versionedConfig || typeof versionedConfig !== "object") {
             throw new Error(
-              "SUPABASE_URL e SUPABASE_ANON_KEY devono essere configurate insieme.",
+              "assets/js/config.js non definisce window.QM_CONFIG.",
             );
           }
 
-          if (supabaseUrl && !supabaseUrl.startsWith("https://")) {
-            throw new Error("SUPABASE_URL deve usare HTTPS.");
+          const publicString = (name, fallback = "") => {
+            const value = versionedConfig[name];
+            return typeof value === "string" ? value.trim() : fallback;
+          };
+
+          const defaultSupabaseUrl = publicString("supabaseUrl");
+          const defaultSupabaseAnonKey = publicString("supabaseAnonKey");
+          const supabaseUrlOverride =
+            (process.env.SUPABASE_URL_OVERRIDE || "").trim();
+          const supabaseAnonKeyOverride =
+            (process.env.SUPABASE_ANON_KEY_OVERRIDE || "").trim();
+
+          function requireCompletePair(url, key, label) {
+            if (Boolean(url) !== Boolean(key)) {
+              throw new Error(
+                `${label}: SUPABASE_URL e SUPABASE_ANON_KEY devono essere configurate insieme.`,
+              );
+            }
           }
 
-          if (supabaseAnonKey) {
-            const normalizedKey = supabaseAnonKey.toLowerCase();
+          function validateSupabaseUrl(url, label) {
+            if (!url) return;
+            let parsed;
+            try {
+              parsed = new URL(url);
+            } catch {
+              throw new Error(`${label}: SUPABASE_URL non è un URL valido.`);
+            }
+            if (
+              parsed.protocol !== "https:" ||
+              parsed.username ||
+              parsed.password ||
+              parsed.search ||
+              parsed.hash ||
+              (parsed.pathname !== "/" && parsed.pathname !== "")
+            ) {
+              throw new Error(
+                `${label}: SUPABASE_URL deve essere una origine HTTPS senza credenziali, percorso, query o frammento.`,
+              );
+            }
+          }
+
+          function validateSupabaseKey(key, label) {
+            if (!key) return;
+            const normalizedKey = key.toLowerCase();
             if (normalizedKey.startsWith("sb_secret_")) {
               throw new Error(
-                "SUPABASE_ANON_KEY contiene una secret key: pubblicazione bloccata.",
+                `${label}: SUPABASE_ANON_KEY contiene una secret key; pubblicazione bloccata.`,
               );
             }
 
-            if (normalizedKey.startsWith("sb_publishable_")) {
-              // Formato publishable corrente: è destinato al browser.
+            if (key.startsWith("sb_publishable_")) {
+              const suffix = key.slice("sb_publishable_".length);
+              if (!/^[A-Za-z0-9_-]{20,}$/.test(suffix)) {
+                throw new Error(
+                  `${label}: SUPABASE_ANON_KEY publishable non è valida.`,
+                );
+              }
             } else {
-              const segments = supabaseAnonKey.split(".");
+              const segments = key.split(".");
               if (segments.length !== 3) {
                 throw new Error(
-                  "SUPABASE_ANON_KEY non è una publishable key né una legacy anon JWT valida.",
+                  `${label}: SUPABASE_ANON_KEY non è una publishable key né una legacy anon JWT valida.`,
                 );
               }
 
@@ -93,17 +141,61 @@ jobs:
                 );
               } catch {
                 throw new Error(
-                  "Impossibile verificare il ruolo della legacy SUPABASE_ANON_KEY.",
+                  `${label}: impossibile verificare il ruolo della legacy SUPABASE_ANON_KEY.`,
                 );
               }
 
               if (payload.role !== "anon") {
                 throw new Error(
-                  "SUPABASE_ANON_KEY non ha ruolo anon: pubblicazione bloccata.",
+                  `${label}: SUPABASE_ANON_KEY non ha ruolo anon; pubblicazione bloccata.`,
                 );
               }
             }
           }
+
+          requireCompletePair(
+            defaultSupabaseUrl,
+            defaultSupabaseAnonKey,
+            "Configurazione versionata",
+          );
+          validateSupabaseUrl(
+            defaultSupabaseUrl,
+            "Configurazione versionata",
+          );
+          validateSupabaseKey(
+            defaultSupabaseAnonKey,
+            "Configurazione versionata",
+          );
+          requireCompletePair(
+            supabaseUrlOverride,
+            supabaseAnonKeyOverride,
+            "Override GitHub Variables",
+          );
+          validateSupabaseUrl(
+            supabaseUrlOverride,
+            "Override GitHub Variables",
+          );
+          validateSupabaseKey(
+            supabaseAnonKeyOverride,
+            "Override GitHub Variables",
+          );
+
+          const usesOverride = Boolean(
+            supabaseUrlOverride && supabaseAnonKeyOverride,
+          );
+          const supabaseUrl = usesOverride
+            ? supabaseUrlOverride
+            : defaultSupabaseUrl;
+          const supabaseAnonKey = usesOverride
+            ? supabaseAnonKeyOverride
+            : defaultSupabaseAnonKey;
+          const paypalClientId =
+            (process.env.PAYPAL_CLIENT_ID || "").trim() ||
+            publicString("paypalClientId");
+          const paypalEnvironment = (
+            (process.env.PAYPAL_ENVIRONMENT || "").trim() ||
+            publicString("paypalEnvironment", "sandbox")
+          ).toLowerCase();
 
           if (!["sandbox", "live"].includes(paypalEnvironment)) {
             throw new Error(
@@ -127,12 +219,15 @@ jobs:
             supabaseUrl,
             supabaseAnonKey,
             paypalClientId,
-            paypalCurrency: "EUR",
+            paypalCurrency: publicString("paypalCurrency", "EUR"),
             paypalEnvironment,
-            siteName: "Area corsi · Quarto MoVimento",
-            supportEmail: "valeria@quartomovimento.it",
-            supportPhone: "327 774 9860",
-            websiteUrl: "https://www.quartomovimento.it",
+            siteName: publicString(
+              "siteName",
+              "Area corsi · Quarto MoVimento",
+            ),
+            supportEmail: publicString("supportEmail"),
+            supportPhone: publicString("supportPhone"),
+            websiteUrl: publicString("websiteUrl"),
           };
 
           const output = [
@@ -141,7 +236,7 @@ jobs:
             "",
           ].join("\n");
 
-          fs.writeFileSync("_site/assets/js/config.js", output, "utf8");
+          fs.writeFileSync(configPath, output, "utf8");
           NODE
 
       - name: Verifica l'artefatto

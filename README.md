@@ -76,16 +76,14 @@ Con Python:
 python -m http.server 5173
 ```
 
-Aprire quindi <http://localhost:5173/>. Se `supabaseUrl` e
-`supabaseAnonKey` in `assets/js/config.js` sono vuoti, l'applicazione entra in
-modalità demo e usa soltanto i dati fittizi inclusi nella repo. Le modifiche demo
-restano soltanto in memoria per la sessione corrente, si azzerano ricaricando la
-pagina e non vengono salvate su Supabase.
-
-Per provare temporaneamente un progetto Supabase remoto in locale, compilare
-solo i valori pubblici in `assets/js/config.js`. Prima di fare commit, riportare
-il file ai valori vuoti. Il workflow Pages genera una copia configurata
-nell'artefatto di pubblicazione e non modifica il file versionato.
+Aprire quindi <http://localhost:5173/>. La configurazione versionata contiene
+soltanto il Project URL e la publishable key del progetto di produzione, entrambi
+valori pubblici destinati al browser: anche in locale, per impostazione
+predefinita, l'app si collega quindi a Supabase. Per usare i dati fittizi aprire
+`?demo=admin#/admin/overview` oppure `?demo=family#/famiglia/home`. Il parametro
+`demo` forza un archivio locale isolato e non crea connessioni o scritture verso
+Supabase. Le modifiche demo restano soltanto in memoria e si azzerano
+ricaricando la pagina.
 
 ## Creazione del progetto Supabase
 
@@ -338,24 +336,26 @@ Nel repository GitHub:
 
 | Variabile GitHub | Obbligatoria | Contenuto |
 | --- | --- | --- |
-| `SUPABASE_URL` | sì per dati reali | Project URL `https://….supabase.co` |
-| `SUPABASE_ANON_KEY` | sì per dati reali | publishable key consigliata, o legacy `anon` durante la migrazione |
+| `SUPABASE_URL` | no | override del Project URL già versionato |
+| `SUPABASE_ANON_KEY` | no | override della publishable key già versionata |
 | `PAYPAL_CLIENT_ID` | sì per PayPal | client ID sandbox o live coerente con l'ambiente |
 | `PAYPAL_ENVIRONMENT` | no | `sandbox` (default) oppure `live` |
 
-Il nome della variabile GitHub `SUPABASE_ANON_KEY` è mantenuto per compatibilità,
-ma può e dovrebbe contenere la nuova publishable key. Questi valori sono
-inevitabilmente pubblici nel browser e vanno configurati come **Variables**, non
-come Secrets GitHub. Il workflow non usa e non deve conoscere
+Il nome della variabile GitHub `SUPABASE_ANON_KEY` è mantenuto per compatibilità.
+Gli override sono facoltativi e, se usati, devono contenere insieme URL e nuova
+publishable key. Questi valori sono inevitabilmente pubblici nel browser e vanno
+configurati come **Variables**, non come Secrets GitHub. Il workflow non usa e
+non deve conoscere
 `PAYPAL_CLIENT_SECRET`, `SUPABASE_SECRET_KEYS` o
 `SUPABASE_SERVICE_ROLE_KEY`.
 
-Se entrambi i valori Supabase sono vuoti, il deploy resta volutamente in
-modalità demo e il workflow emette un avviso. Se è presente soltanto uno dei
-due, il workflow fallisce per evitare un deploy parzialmente configurato. Come
-ulteriore protezione, rifiuta le chiavi con prefisso `sb_secret_` e le legacy
-JWT il cui ruolo non è `anon`, così una chiave privilegiata incollata per errore
-non viene pubblicata nell'artefatto.
+Il workflow legge il fallback direttamente da `assets/js/config.js` quando gli
+override non sono definiti, evitando una seconda copia di URL e chiave nel file
+YAML.
+Se viene impostato soltanto uno dei due valori, fallisce per evitare un deploy
+parzialmente configurato. Come ulteriore protezione, rifiuta le chiavi con
+prefisso `sb_secret_` e le legacy JWT il cui ruolo non è `anon`, così una chiave
+privilegiata incollata per errore non viene pubblicata nell'artefatto.
 
 L'indirizzo pubblico primario è:
 
@@ -363,10 +363,9 @@ L'indirizzo pubblico primario è:
 https://gestionale.quartomovimento.it/
 ```
 
-Il file `CNAME` nella radice contiene lo stesso hostname e viene incluso
-nell'artefatto dal workflow. Con una pubblicazione tramite GitHub Actions è
-comunque la configurazione **Settings → Pages → Custom domain** a essere
-autorevole: il solo file non attiva il dominio.
+Il file `CNAME` nella radice documenta lo stesso hostname. Con una pubblicazione
+tramite GitHub Actions è la configurazione **Settings → Pages → Custom domain**
+a essere autorevole: il solo file non attiva il dominio.
 
 Configurare il dominio in questo ordine:
 

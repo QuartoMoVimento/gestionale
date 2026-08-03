@@ -5303,17 +5303,17 @@
 
   async function init() {
     try {
+      const demoRole = new URLSearchParams(window.location.search).get("demo");
+      if ([ROLE_ADMIN, ROLE_FAMILY].includes(demoRole)) {
+        state.store = new DemoStore();
+        state.loading = false;
+        await loginDemo(demoRole);
+        return;
+      }
       if (!isSupabaseConfigured) {
         state.store = new DemoStore();
         state.loading = false;
-        const demoRole = new URLSearchParams(window.location.search).get(
-          "demo",
-        );
-        if ([ROLE_ADMIN, ROLE_FAMILY].includes(demoRole)) {
-          await loginDemo(demoRole);
-        } else {
-          renderLogin();
-        }
+        renderLogin();
         return;
       }
       if (!window.supabase?.createClient) {
