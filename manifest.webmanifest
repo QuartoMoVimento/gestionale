@@ -1,0 +1,17 @@
+{
+  "name": "Area corsi · Quarto MoVimento",
+  "short_name": "Quarto MoVimento",
+  "description": "Lezioni, presenze, recuperi e pagamenti dei corsi.",
+  "start_url": "./#/login",
+  "display": "standalone",
+  "background_color": "#f8f7fc",
+  "theme_color": "#08457c",
+  "icons": [
+    {
+      "src": "assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

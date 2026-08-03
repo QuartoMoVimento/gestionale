@@ -1,0 +1,188 @@
+name: Pubblica su GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: read
+
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@v6
+
+      - name: Configura GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepara i file statici
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp index.html 404.html manifest.webmanifest _site/
+          cp -R assets _site/assets
+          if [[ -f CNAME ]]; then
+            cp CNAME _site/
+          fi
+
+      - name: Genera la configurazione pubblica
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          PAYPAL_CLIENT_ID: ${{ vars.PAYPAL_CLIENT_ID }}
+          PAYPAL_ENVIRONMENT: ${{ vars.PAYPAL_ENVIRONMENT }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const supabaseUrl = (process.env.SUPABASE_URL || "").trim();
+          const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || "").trim();
+          const paypalClientId = (process.env.PAYPAL_CLIENT_ID || "").trim();
+          const paypalEnvironment =
+            (process.env.PAYPAL_ENVIRONMENT || "sandbox").trim().toLowerCase();
+
+          const supabaseValues = [supabaseUrl, supabaseAnonKey].filter(Boolean);
+          if (supabaseValues.length === 1) {
+            throw new Error(
+              "SUPABASE_URL e SUPABASE_ANON_KEY devono essere configurate insieme.",
+            );
+          }
+
+          if (supabaseUrl && !supabaseUrl.startsWith("https://")) {
+            throw new Error("SUPABASE_URL deve usare HTTPS.");
+          }
+
+          if (supabaseAnonKey) {
+            const normalizedKey = supabaseAnonKey.toLowerCase();
+            if (normalizedKey.startsWith("sb_secret_")) {
+              throw new Error(
+                "SUPABASE_ANON_KEY contiene una secret key: pubblicazione bloccata.",
+              );
+            }
+
+            if (normalizedKey.startsWith("sb_publishable_")) {
+              // Formato publishable corrente: è destinato al browser.
+            } else {
+              const segments = supabaseAnonKey.split(".");
+              if (segments.length !== 3) {
+                throw new Error(
+                  "SUPABASE_ANON_KEY non è una publishable key né una legacy anon JWT valida.",
+                );
+              }
+
+              let payload;
+              try {
+                payload = JSON.parse(
+                  Buffer.from(segments[1], "base64url").toString("utf8"),
+                );
+              } catch {
+                throw new Error(
+                  "Impossibile verificare il ruolo della legacy SUPABASE_ANON_KEY.",
+                );
+              }
+
+              if (payload.role !== "anon") {
+                throw new Error(
+                  "SUPABASE_ANON_KEY non ha ruolo anon: pubblicazione bloccata.",
+                );
+              }
+            }
+          }
+
+          if (!["sandbox", "live"].includes(paypalEnvironment)) {
+            throw new Error(
+              "PAYPAL_ENVIRONMENT deve essere 'sandbox' oppure 'live'.",
+            );
+          }
+
+          if (!supabaseUrl) {
+            console.log(
+              "::warning::SUPABASE_URL e SUPABASE_ANON_KEY non impostate: pubblicazione in modalità demo.",
+            );
+          }
+
+          if (!paypalClientId) {
+            console.log(
+              "::notice::PAYPAL_CLIENT_ID non impostato: il pagamento PayPal resterà disabilitato.",
+            );
+          }
+
+          const config = {
+            supabaseUrl,
+            supabaseAnonKey,
+            paypalClientId,
+            paypalCurrency: "EUR",
+            paypalEnvironment,
+            siteName: "Area corsi · Quarto MoVimento",
+            supportEmail: "valeria@quartomovimento.it",
+            supportPhone: "327 774 9860",
+            websiteUrl: "https://www.quartomovimento.it",
+          };
+
+          const output = [
+            "/* Generato da GitHub Actions: contiene solo valori pubblici. */",
+            `window.QM_CONFIG = ${JSON.stringify(config, null, 2)};`,
+            "",
+          ].join("\n");
+
+          fs.writeFileSync("_site/assets/js/config.js", output, "utf8");
+          NODE
+
+      - name: Verifica l'artefatto
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_files=(
+            "_site/index.html"
+            "_site/404.html"
+            "_site/manifest.webmanifest"
+            "_site/assets/css/styles.css"
+            "_site/assets/js/config.js"
+            "_site/assets/js/demo-data.js"
+            "_site/assets/js/app.js"
+          )
+
+          for required_file in "${required_files[@]}"; do
+            test -s "$required_file" || {
+              echo "::error file=$required_file::File statico mancante o vuoto"
+              exit 1
+            }
+          done
+
+      - name: Carica l'artefatto Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Pubblica su GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

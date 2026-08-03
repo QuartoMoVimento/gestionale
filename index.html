@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        base-uri 'self';
+        object-src 'none';
+        form-action 'self' https://*.paypal.com;
+        manifest-src 'self';
+        script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        font-src 'self' data: https://fonts.gstatic.com https://*.paypalobjects.com;
+        img-src 'self' data: https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        child-src 'self' https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+        frame-src 'self' https://*.paypal.com https://*.paypalobjects.com https://*.venmo.com;
+      "
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08457c" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta
+      name="description"
+      content="Area riservata di Quarto MoVimento per lezioni, presenze, recuperi e pagamenti."
+    />
+    <title>Area corsi · Quarto MoVimento</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=Rochester&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="assets/css/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Vai al contenuto</a>
+
+    <div id="app" aria-live="polite">
+      <div class="app-loader" role="status">
+        <span class="brand-mark brand-mark--loader" aria-hidden="true">
+          <span>Q</span><span>M</span>
+        </span>
+        <p>Accordiamo tutto…</p>
+      </div>
+    </div>
+
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-stack" aria-live="assertive"></div>
+
+    <noscript>
+      <div class="noscript">
+        Per usare l’area riservata è necessario attivare JavaScript nel browser.
+      </div>
+    </noscript>
+
+    <script src="assets/js/config.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.8/dist/umd/supabase.js"
+      integrity="sha384-l7yJnh/cWKcqeTC5adHUdc5b+J4Kb2QTGRSkCQehn1YT5xEFlrgwnXOYuvrtI1F6"
+      crossorigin="anonymous"
+    ></script>
+    <script src="assets/js/demo-data.js"></script>
+    <script src="assets/js/app.js"></script>
+  </body>
+</html>
