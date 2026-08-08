@@ -316,6 +316,17 @@
     return String(value || "").replace(/[^\d+]/g, "");
   }
 
+  function normalizeEmailList(value) {
+    const source = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
+    return [...new Set(source
+      .map((email) => String(email || "").trim().toLowerCase())
+      .filter(Boolean))];
+  }
+
+  function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || ""));
+  }
+
   function whatsappNumber(value) {
     const digits = normalizePhone(value).replace(/^\+/, "");
     return digits.startsWith("39") ? digits : `39${digits}`;
@@ -402,6 +413,19 @@
     );
   }
 
+  function invoiceCanBeVoided(invoice) {
+    if (!invoice || invoiceEffectiveStatus(invoice) === "void") return false;
+    const hasActivePayment = paymentsForInvoice(invoice.id).some(
+      (payment) => !["failed", "cancelled"].includes(payment.status),
+    );
+    const hasActiveNotice = (state.data?.bankTransferNotices || []).some(
+      (notice) =>
+        notice.invoice_id === invoice.id &&
+        ["submitted", "verified"].includes(notice.status),
+    );
+    return !hasActivePayment && !hasActiveNotice;
+  }
+
   function makeupEffectiveStatus(credit) {
     if (
       ["available", "proposed"].includes(credit?.status) &&
@@ -463,6 +487,8 @@
       cancelled: "Annullato",
       partially_paid: "Parziale",
       processing: "In verifica",
+      void: "Annullata",
+      refunded: "Rimborsata",
     },
     lessonType: {
       regular: "Lezione",
@@ -512,7 +538,7 @@
     if (["paid", "present", "completed", "used"].includes(status)) {
       modifier = "success";
     } else if (
-      ["overdue", "absent_unexcused", "expired", "cancelled_other"].includes(
+      ["overdue", "absent_unexcused", "expired", "cancelled_other", "void"].includes(
         status,
       )
     ) {
@@ -588,6 +614,38 @@
     return student && state.data
       ? state.data.families.find((item) => item.id === student.family_id)
       : null;
+  }
+
+  function familyLinkedAccessEmails(familyOrId) {
+    const family = typeof familyOrId === "string"
+      ? state.data?.families?.find((item) => item.id === familyOrId)
+      : familyOrId;
+    if (!family) return [];
+    return normalizeEmailList(
+      (state.data?.familyUsers || [])
+      .filter((item) => item.family_id === family.id)
+      .map((item) => {
+        const profile = Array.isArray(item.profile)
+          ? item.profile[0]
+          : item.profile;
+        return profile?.is_active === false ? "" : profile?.email;
+      }),
+    ).filter(
+      (email) => isValidEmail(email) && !email.endsWith("@invalid.local"),
+    );
+  }
+
+  function familyAccessEmails(familyOrId) {
+    const family = typeof familyOrId === "string"
+      ? state.data?.families?.find((item) => item.id === familyOrId)
+      : familyOrId;
+    if (!family) return [];
+    return normalizeEmailList([
+      family.email,
+      ...familyLinkedAccessEmails(family),
+    ]).filter(
+      (email) => isValidEmail(email) && !email.endsWith("@invalid.local"),
+    );
   }
 
   function studentForInvoice(invoice) {
@@ -853,6 +911,9 @@
           )
           .map((item) => item.id);
         copy.families = copy.families.filter((item) => item.id === familyId);
+        copy.familyUsers = (copy.familyUsers || []).filter(
+          (item) => item.family_id === familyId,
+        );
         copy.students = copy.students.filter((item) =>
           studentIds.includes(item.id),
         );
@@ -971,6 +1032,17 @@
         if (enrollment) Object.assign(enrollment, values);
         else this.data.enrollments.push(values);
       }
+      const invitations = [];
+      for (const email of normalizeEmailList(payload.invite_emails || [])) {
+        const result = await this.inviteFamily({ familyId, email });
+        invitations.push({
+          email,
+          sent: Boolean(result?.invitation_sent),
+          linked: Boolean(result?.linked_existing_user),
+          activationLink: null,
+          error: null,
+        });
+      }
       return {
         studentId,
         familyId,
@@ -979,7 +1051,8 @@
         enrollment: this.data.enrollments.find(
           (item) => item.student_id === studentId && item.is_active !== false,
         ),
-        inviteSent: !payload.id && Boolean(payload.email),
+        invitations,
+        inviteSent: invitations.some((item) => item.sent),
       };
     }
 
@@ -1358,6 +1431,95 @@
       invoice.paid_at = new Date().toISOString();
     }
 
+    async voidInvoice(invoiceId, reason) {
+      const invoice = this.data.invoices.find((item) => item.id === invoiceId);
+      if (!invoice) throw new Error("Scadenza non trovata.");
+      const hasActivePayment = this.data.payments.some(
+        (item) =>
+          item.invoice_id === invoiceId &&
+          !["failed", "cancelled"].includes(item.status),
+      );
+      const hasActiveNotice = this.data.bankTransferNotices.some(
+        (item) =>
+          item.invoice_id === invoiceId &&
+          ["submitted", "verified"].includes(item.status),
+      );
+      if (hasActivePayment || hasActiveNotice) {
+        throw new Error(
+          "Prima annulla l’incasso o completa la verifica del bonifico collegato.",
+        );
+      }
+      invoice.status = "void";
+      invoice.effective_status = "void";
+      invoice.payment_method = null;
+      invoice.paid_at = null;
+      invoice.voided_at = new Date().toISOString();
+      invoice.void_reason = reason;
+      return invoice;
+    }
+
+    async cancelManualPayment(paymentId, reason) {
+      const payment = this.data.payments.find((item) => item.id === paymentId);
+      if (!payment) throw new Error("Incasso non trovato.");
+      if (payment.provider !== "manual" || payment.status !== "completed") {
+        throw new Error("Questo incasso non può essere annullato dal gestionale.");
+      }
+      payment.status = "cancelled";
+      payment.provider_status = "CANCELLED_BY_ADMIN";
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        cancelled_by_admin: {
+          at: new Date().toISOString(),
+          reason,
+        },
+      };
+      if (String(payment.idempotency_key || "").startsWith("bank_notice:")) {
+        const noticeId = payment.idempotency_key.slice("bank_notice:".length);
+        const notice = this.data.bankTransferNotices.find(
+          (item) => item.id === noticeId && item.status === "verified",
+        );
+        if (notice) {
+          notice.status = "rejected";
+          notice.reviewed_at = new Date().toISOString();
+          notice.review_note = `Incasso annullato: ${reason}`;
+        }
+      }
+      const invoice = this.data.invoices.find(
+        (item) => item.id === payment.invoice_id,
+      );
+      if (invoice) {
+        const paid = this.data.payments
+          .filter(
+            (item) =>
+              item.invoice_id === invoice.id &&
+              ["completed", "partially_refunded", "refunded"].includes(
+                item.status,
+              ),
+          )
+          .reduce(
+            (sum, item) =>
+              sum +
+              Math.max(
+                0,
+                Number(item.amount_cents || 0) -
+                  Number(item.refunded_cents || 0),
+              ),
+            0,
+          );
+        invoice.status = paid > 0
+          ? paid >= invoice.total_cents
+            ? "paid"
+            : "partially_paid"
+          : isPastDay(invoice.due_date)
+            ? "overdue"
+            : "pending";
+        invoice.effective_status = invoice.status;
+        invoice.payment_method = paid > 0 ? invoice.payment_method : null;
+        invoice.paid_at = invoice.status === "paid" ? invoice.paid_at : null;
+      }
+      return payment;
+    }
+
     async submitBankNotice(payload) {
       const invoice = this.data.invoices.find(
         (item) => item.id === payload.invoiceId,
@@ -1462,8 +1624,34 @@
       return { status: "COMPLETED" };
     }
 
-    async inviteFamily() {
-      return { demo: true };
+    async inviteFamily(payload) {
+      const email = normalizeEmailList([payload?.email])[0];
+      if (!email) throw new Error("E-mail non valida.");
+      this.data.familyUsers = this.data.familyUsers || [];
+      const existing = this.data.familyUsers.find((item) => {
+        const profile = Array.isArray(item.profile)
+          ? item.profile[0]
+          : item.profile;
+        return item.family_id === payload.familyId && profile?.email === email;
+      });
+      if (!existing) {
+        this.data.familyUsers.push({
+          family_id: payload.familyId,
+          user_id: `demo-user-${Date.now()}-${this.data.familyUsers.length}`,
+          is_primary: false,
+          relationship: null,
+          profile: {
+            email,
+            display_name: payload.guardianName || email.split("@")[0],
+            is_active: true,
+          },
+        });
+      }
+      return {
+        demo: true,
+        invitation_sent: !existing,
+        linked_existing_user: Boolean(existing),
+      };
     }
   }
 
@@ -1504,6 +1692,7 @@
     async loadData(role) {
       const [
         families,
+        familyUsers,
         students,
         courses,
         enrollments,
@@ -1519,6 +1708,13 @@
         this.query("families", "*", (query) =>
           query.order("display_name", { ascending: true }),
         ),
+        role === ROLE_ADMIN
+          ? this.query(
+              "family_users",
+              "family_id,user_id,is_primary,relationship,profile:profiles!family_users_user_id_fkey(email,display_name,is_active)",
+              (query) => query.order("created_at", { ascending: true }),
+            )
+          : Promise.resolve([]),
         this.query("students", "*", (query) =>
           query.order("last_name", { ascending: true }),
         ),
@@ -1556,6 +1752,7 @@
       );
       return {
         families,
+        familyUsers,
         students:
           role === ROLE_FAMILY
             ? students.filter((item) => item.is_active !== false)
@@ -1580,42 +1777,59 @@
     }
 
     async saveStudent(payload) {
-      const isNew = !payload.id && !payload.student_id;
       const { data, error } = await this.client.rpc(
         "admin_upsert_student_family",
         { p_payload: payload },
       );
       if (error) throw error;
-      let inviteSent = false;
-      let linkedExistingUser = false;
-      let inviteError = null;
-      let activationLink = null;
-      if (isNew && payload.email) {
+      const invitations = [];
+      const primaryEmail = normalizeEmailList([payload.email])[0] || "";
+      for (const email of normalizeEmailList(payload.invite_emails || [])) {
         try {
           const invitation = await this.inviteFamily({
             familyId: data.family.id,
-            email: payload.email,
-            guardianName: payload.guardian_name,
+            email,
+            guardianName:
+              email === primaryEmail ? payload.guardian_name : "",
           });
-          inviteSent = Boolean(invitation?.invitation_sent);
-          linkedExistingUser = Boolean(invitation?.linked_existing_user);
-          activationLink =
-            invitation?.manual_invite_url || invitation?.activation_link || null;
-        } catch (error) {
-          inviteError =
-            error?.message ||
-            "Allievo salvato, ma non è stato possibile inviare l’invito.";
-          activationLink = error?.activationLink || null;
+          invitations.push({
+            email,
+            sent: Boolean(invitation?.invitation_sent),
+            linked: Boolean(invitation?.linked_existing_user),
+            activationLink:
+              invitation?.manual_invite_url ||
+              invitation?.activation_link ||
+              null,
+            error: null,
+          });
+        } catch (inviteFailure) {
+          invitations.push({
+            email,
+            sent: false,
+            linked: false,
+            activationLink: inviteFailure?.activationLink || null,
+            error:
+              inviteFailure?.message ||
+              "Non è stato possibile preparare l’invito.",
+          });
         }
       }
+      const firstManual = invitations.find((item) => item.activationLink);
+      const failures = invitations.filter(
+        (item) => item.error && !item.activationLink,
+      );
       return {
         ...data,
         studentId: data.student.id,
         familyId: data.family.id,
-        inviteSent,
-        linkedExistingUser,
-        inviteError,
-        activationLink,
+        invitations,
+        inviteSent: invitations.some((item) => item.sent),
+        linkedExistingUser: invitations.some((item) => item.linked),
+        inviteError:
+          failures
+            .map((item) => `${item.email}: ${item.error}`)
+            .join(" · ") || null,
+        activationLink: firstManual?.activationLink || null,
       };
     }
 
@@ -1816,6 +2030,27 @@
         })
         .eq("id", invoiceId);
       if (updateError) throw updateError;
+    }
+
+    async voidInvoice(invoiceId, reason) {
+      const { data, error } = await this.client.rpc("admin_void_invoice", {
+        p_invoice_id: invoiceId,
+        p_reason: reason,
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async cancelManualPayment(paymentId, reason) {
+      const { data, error } = await this.client.rpc(
+        "admin_cancel_manual_payment",
+        {
+          p_payment_id: paymentId,
+          p_reason: reason,
+        },
+      );
+      if (error) throw error;
+      return data;
     }
 
     async submitBankNotice(payload) {
@@ -2094,7 +2329,7 @@
                   <div class="sidebar-help">
                    <strong>Serve una mano?</strong>
                    <p>Per assenze, cambi orario o dubbi scrivimi direttamente.</p>
-                    ${supportActions(true)}
+                    ${supportActions(false)}
                   </div>
                 `
                 : ""
@@ -2651,7 +2886,7 @@
         if (student.is_active === false) return false;
         const course = courseForStudent(student.id);
         const family = familyForStudent(student);
-        const haystack = `${fullName(student)} ${student.fiscal_code || ""} ${student.residence_address || ""} ${family?.guardian_name || ""} ${family?.email || ""}`.toLowerCase();
+        const haystack = `${fullName(student)} ${student.fiscal_code || ""} ${student.residence_address || ""} ${family?.guardian_name || ""} ${familyAccessEmails(family).join(" ")}`.toLowerCase();
         const matchesSearch = !query || haystack.includes(query);
         const matchesCourse =
           state.filters.studentCourse === "all" ||
@@ -2897,7 +3132,7 @@
         const status = invoiceEffectiveStatus(invoice);
         return (
           (!query || haystack.includes(query)) &&
-          (state.filters.paymentStatus === "all" ||
+          ((state.filters.paymentStatus === "all" && status !== "void") ||
             status === state.filters.paymentStatus)
         );
       })
@@ -3012,13 +3247,17 @@
               <span>${escapeHTML(invoice.title)}</span>
             </span>
           </div>
-          ${statusBadge("invoice", status)}
+          <div class="row-actions">
+            ${statusBadge("invoice", status)}
+            <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
+            ${invoiceCanBeVoided(invoice) ? `<button class="row-action" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Elimina scadenza">${icon("trash", 16)}</button>` : ""}
+          </div>
         </div>
         <div class="mobile-row__meta">
           <div><span>Da saldare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
           <div><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
           <div><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
-          <div><span>Azione</span>${!["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>Verifica il bonifico</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
+          <div><span>Azione</span>${status === "void" ? "<strong>Annullata</strong>" : !["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>Verifica il bonifico</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
         </div>
       </article>
     `;
@@ -3126,7 +3365,7 @@
             </div>
             <select class="select filter-select" id="payment-status-filter" aria-label="Filtra per stato">
               <option value="all">Tutti gli stati</option>
-              ${["pending", "overdue", "partially_paid", "processing", "paid"]
+              ${["pending", "overdue", "partially_paid", "processing", "paid", "void"]
                 .map(
                   (status) =>
                     `<option value="${status}"${state.filters.paymentStatus === status ? " selected" : ""}>${escapeHTML(LABELS.invoice[status])}</option>`,
@@ -3177,10 +3416,11 @@
                               <div class="row-actions">
                                 <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
                                 ${
-                                  !["paid", "processing"].includes(status)
+                                  !["paid", "processing", "void"].includes(status)
                                     ? `<button class="row-action" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Segna come pagato">${icon("checkSimple", 16)}</button>`
                                     : ""
                                 }
+                                ${invoiceCanBeVoided(invoice) ? `<button class="row-action" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Elimina scadenza">${icon("trash", 16)}</button>` : ""}
                               </div>
                             </td>
                           </tr>
@@ -3507,9 +3747,9 @@
       }
       <section class="card" style="margin-top:18px">
         <header class="card-header">
-          <div><h2>Serve una mano?</h2><p>Scrivi a Valeria, prenota un colloquio o lascia una notifica nel gestionale.</p></div>
+          <div><h2>Serve una mano?</h2><p>Scrivi a Valeria o prenota un colloquio.</p></div>
         </header>
-        ${supportActions(true)}
+        ${supportActions(false)}
       </section>
     `;
   }
@@ -3653,8 +3893,8 @@
 
         <article class="card card--tinted-yellow">
           <header class="card-header"><div><h2>Come funzionano le assenze?</h2><p>La regola del tuo piano</p></div></header>
-          <p class="muted" style="font-size:12px">Comunica l’assenza almeno <strong>${escapeHTML(state.data.settings.absence_notice_hours ?? 24)} ore prima</strong>. I piani annuali e semestrali possono maturare un recupero; il piano mensile prevede il pagamento delle lezioni effettivamente frequentate e non genera crediti automatici.</p>
-          <a href="https://www.quartomovimento.it/regolamento-della-scuola/" target="_blank" rel="noopener" class="btn btn--secondary btn--sm">Leggi il regolamento ${icon("arrowRight", 14)}</a>
+          <p class="muted" style="font-size:12px">Comunica l’assenza almeno <strong>${escapeHTML(state.data.settings.absence_notice_hours ?? 24)} ore prima per poter organizzare il recupero</strong>. Il piano mensile non prevede che le assenze vengano riconosciute sotto forma di credito; i piani trimestrali e annuali possono maturare recuperi. Per maggiori dettagli consulta il regolamento.</p>
+          <a href="https://drive.google.com/file/d/1GnFRybVlJXnCPzXfwIK7jK5V45eLvrS1/view?usp=drive_link" target="_blank" rel="noopener noreferrer" class="btn btn--secondary btn--sm">Leggi il regolamento ${icon("arrowRight", 14)}</a>
         </article>
       </section>
 
@@ -3975,6 +4215,8 @@
       ? state.data.students.find((item) => item.id === studentId)
       : null;
     const family = student ? familyForStudent(student) : null;
+    const accessEmails = familyAccessEmails(family);
+    const linkedEmails = familyLinkedAccessEmails(family);
     const enrollment = student ? enrollmentForStudent(student.id) : null;
     const defaultEnd = state.data.settings.academic_year_end || "";
     openModal({
@@ -4000,7 +4242,7 @@
           </div>
           <div class="setting-section">
             <h3>Famiglia e contatti</h3>
-            <p>Per una nuova famiglia, l’e-mail verrà usata per l’invito.</p>
+            <p>Ogni indirizzo invitato potrà accedere alla stessa area riservata della famiglia.</p>
             <div class="form-grid">
               <div class="field field--full">
                 <label for="student-family-id">Nucleo esistente</label>
@@ -4011,8 +4253,10 @@
               </div>
               <div class="field"><label for="guardian-name">Nome del genitore/tutore</label><input class="input" id="guardian-name" name="guardian_name" value="${escapeHTML(family?.guardian_name || "")}" placeholder="Es. Giulia Bianchi" /></div>
               <div class="field"><label for="family-display-name">Nome famiglia</label><input class="input" id="family-display-name" name="family_display_name" value="${escapeHTML(family?.display_name || "")}" placeholder="Es. Famiglia Bianchi" /></div>
-              <div class="field"><label for="guardian-email">E-mail</label><input class="input" id="guardian-email" name="email" type="email" value="${escapeHTML(family?.email || "")}" /></div>
+              <div class="field"><label for="guardian-email">E-mail principale</label><input class="input" id="guardian-email" name="email" type="email" value="${escapeHTML(family?.email || "")}" required /></div>
               <div class="field"><label for="guardian-phone">Telefono</label><input class="input" id="guardian-phone" name="phone" type="tel" value="${escapeHTML(family?.phone || "")}" /></div>
+              ${linkedEmails.length ? `<div class="field field--full"><label>Accessi già collegati</label><p class="field-hint">${linkedEmails.map((email) => escapeHTML(email)).join(" · ")}</p></div>` : `<div class="field field--full"><p class="field-hint">Non è ancora collegato alcun account: salva per preparare l’invito.</p></div>`}
+              <div class="field field--full"><label for="guardian-additional-emails">Altre e-mail da invitare</label><textarea class="textarea" id="guardian-additional-emails" name="additional_emails" rows="3" placeholder="Un indirizzo per riga, oppure separati da virgola"></textarea><p class="field-hint">Puoi aggiungere fino a 10 nuovi indirizzi. Gli accessi esistenti non vengono rimossi cancellando questo campo.</p></div>
             </div>
           </div>
           <div class="setting-section">
@@ -4046,7 +4290,7 @@
       footer: `
         ${student ? `<button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina allievo</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button>
-        ${student && family?.email && !family.email.endsWith("@invalid.local") ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(family.email)}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Invia/reinvia accesso</button>` : ""}
+        ${student && accessEmails[0] ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(accessEmails[0])}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Reinvia accesso principale</button>` : ""}
         <button class="btn btn--primary" type="submit" form="student-form">${student ? "Salva modifiche" : "Aggiungi e invita"}</button>
       `,
     });
@@ -4056,6 +4300,8 @@
     const student = state.data.students.find((item) => item.id === studentId);
     if (!student) return;
     const family = familyForStudent(student);
+    const accessEmails = familyAccessEmails(family);
+    const linkedEmails = familyLinkedAccessEmails(family);
     const course = courseForStudent(student.id);
     const enrollment = enrollmentForStudent(student.id);
     const stats = studentAttendanceStats(student.id);
@@ -4084,7 +4330,18 @@
           <p>${escapeHTML(family?.display_name || "")}</p>
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.guardian_name || "—")}</strong><span>Genitore o tutore</span></span></div>
-            <div class="activity-item"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.email || "—")}</strong><span>E-mail di accesso</span></span></div>
+            ${accessEmails.length
+              ? accessEmails
+                  .map(
+                    (email) => {
+                      const isPrimary =
+                        email === normalizeEmailList([family.email])[0];
+                      const isLinked = linkedEmails.includes(email);
+                      return `<div class="activity-item"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"} · ${isLinked ? "collegato" : "da invitare"}</span></span><button class="row-action" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" aria-label="Invia o reinvia accesso a ${escapeHTML(email)}">${icon("mail", 16)}</button></div>`;
+                    },
+                  )
+                  .join("")
+              : `<div class="activity-item"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>—</strong><span>Nessuna e-mail di accesso</span></span></div>`}
             <div class="activity-item"><span class="activity-icon">${icon("phone", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.phone || "—")}</strong><span>Telefono</span></span></div>
           </div>
         </div>
@@ -4094,7 +4351,6 @@
       footer: `
         <button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina</button>
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
-        ${family?.email && !family.email.endsWith("@invalid.local") ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(family.email)}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Invia/reinvia accesso</button>` : ""}
         <button class="btn btn--primary" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}">${icon("edit", 15)} Modifica</button>
       `,
     });
@@ -4370,7 +4626,9 @@
     const status = invoiceEffectiveStatus(invoice);
     const ledger = paymentsForInvoice(invoice.id)
       .filter((item) =>
-        ["completed", "partially_refunded", "refunded"].includes(item.status),
+        ["completed", "partially_refunded", "refunded", "cancelled"].includes(
+          item.status,
+        ),
       )
       .sort(
         (a, b) =>
@@ -4389,6 +4647,7 @@
           <div class="bank-box__row"><span>Da incassare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))} ${statusBadge("invoice", status)}</strong></div>
           <div class="bank-box__row"><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
         </div>
+        ${status === "void" ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p><strong>Scadenza annullata.</strong> ${escapeHTML(invoice.void_reason || "")}${invoice.voided_at ? ` · ${escapeHTML(formatDate(invoice.voided_at))}` : ""}</p></div>` : ""}
         <div class="activity-list" style="margin-top:16px">
           <div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.display_name || "—")}</strong><span>${escapeHTML(family?.email || "")}</span></span></div>
           <div class="activity-item"><span class="activity-icon">${icon("receipt", 16)}</span><span class="activity-copy"><strong>${escapeHTML(invoice.description || invoice.title)}</strong><span>${invoice.paid_at ? `Pagato il ${escapeHTML(formatDate(invoice.paid_at))}` : "In attesa di pagamento"}</span></span></div>
@@ -4400,13 +4659,56 @@
                   const net =
                     Number(payment.amount_cents || 0) -
                     Number(payment.refunded_cents || 0);
-                  return `<div class="activity-item"><span class="activity-icon">${icon("wallet", 16)}</span><span class="activity-copy"><strong>${escapeHTML(formatMoney(net, payment.currency))} · ${escapeHTML(paymentMethodLabel(payment.method))}</strong><span>${escapeHTML(formatDate(payment.paid_at || payment.created_at))}${payment.reference ? ` · ${escapeHTML(payment.reference)}` : ""}</span></span></div>`;
+                  const cancellation =
+                    payment.metadata?.cancelled_by_admin || null;
+                  return `<div class="activity-item"><span class="activity-icon">${icon("wallet", 16)}</span><span class="activity-copy"><strong>${escapeHTML(formatMoney(net, payment.currency))} · ${escapeHTML(paymentMethodLabel(payment.method))}${payment.status === "cancelled" ? " · annullato" : ""}</strong><span>${escapeHTML(formatDate(payment.paid_at || payment.created_at))}${payment.reference ? ` · ${escapeHTML(payment.reference)}` : ""}${cancellation?.reason ? ` · ${escapeHTML(cancellation.reason)}` : ""}</span></span>${payment.provider === "manual" && payment.status === "completed" ? `<button class="row-action" type="button" data-action="open-cancel-payment" data-payment-id="${escapeHTML(payment.id)}" aria-label="Annulla incasso">${icon("trash", 16)}</button>` : ""}</div>`;
                 })
                 .join("")}</div></div>`
             : ""
         }
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${!["paid", "processing"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${invoiceCanBeVoided(invoice) ? `<button class="btn btn--danger" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina scadenza</button>` : ""}${!["paid", "processing", "void"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
+    });
+  }
+
+  function openVoidInvoiceModal(invoiceId) {
+    const invoice = state.data.invoices.find((item) => item.id === invoiceId);
+    if (!invoice || !invoiceCanBeVoided(invoice)) return;
+    openModal({
+      title: "Elimina scadenza",
+      subtitle: `${invoice.number} · ${invoice.title}`,
+      className: "modal--sm",
+      body: `
+        <form id="void-invoice-form">
+          <input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />
+          <div class="info-callout">${icon("info", 17)}<p>La scadenza verrà annullata e nascosta alle famiglie, conservando lo storico contabile. Se contiene un incasso, annulla prima quel movimento.</p></div>
+          <div class="field" style="margin-top:16px"><label for="void-invoice-reason">Motivo</label><textarea class="textarea" id="void-invoice-reason" name="reason" rows="3" maxlength="500" placeholder="Es. Scadenza inserita per errore" required></textarea></div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Torna indietro</button><button class="btn btn--danger" type="submit" form="void-invoice-form">${icon("trash", 15)} Elimina scadenza</button>`,
+    });
+  }
+
+  function openCancelManualPaymentModal(paymentId) {
+    const payment = state.data.payments.find((item) => item.id === paymentId);
+    if (!payment || payment.provider !== "manual" || payment.status !== "completed") {
+      return;
+    }
+    const invoice = state.data.invoices.find(
+      (item) => item.id === payment.invoice_id,
+    );
+    openModal({
+      title: "Annulla incasso",
+      subtitle: `${invoice?.number || "Scadenza"} · ${formatMoney(payment.amount_cents, payment.currency)}`,
+      className: "modal--sm",
+      body: `
+        <form id="cancel-payment-form">
+          <input type="hidden" name="payment_id" value="${escapeHTML(payment.id)}" />
+          <div class="info-callout">${icon("info", 17)}<p>Il movimento non verrà cancellato fisicamente: sarà stornato e resterà visibile nello storico. I pagamenti PayPal si gestiscono dal provider.</p></div>
+          <div class="field" style="margin-top:16px"><label for="cancel-payment-reason">Motivo</label><textarea class="textarea" id="cancel-payment-reason" name="reason" rows="3" maxlength="500" placeholder="Es. Incasso registrato due volte" required></textarea></div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Torna indietro</button><button class="btn btn--danger" type="submit" form="cancel-payment-form">${icon("trash", 15)} Annulla incasso</button>`,
     });
   }
 
@@ -5052,6 +5354,41 @@
     });
   }
 
+  function openInvitationResults(invitations, studentUpdated) {
+    const rows = (invitations || [])
+      .map((invitation, index) => {
+        let outcome = '<span class="badge badge--success">Invito inviato</span>';
+        if (invitation.activationLink) {
+          outcome = '<span class="badge badge--warning">Link manuale</span>';
+        } else if (invitation.error) {
+          outcome = '<span class="badge badge--danger">Da riprovare</span>';
+        } else if (invitation.linked) {
+          outcome = '<span class="badge badge--success">Account collegato</span>';
+        }
+        return `
+          <div class="setting-section"${index === 0 ? ' style="margin-top:0"' : ""}>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <strong>${escapeHTML(invitation.email)}</strong>
+              ${outcome}
+            </div>
+            ${invitation.activationLink
+              ? `<p class="field-hint" style="margin-top:8px">L’e-mail automatica non è disponibile: condividi questo link personale e temporaneo.</p><div class="field" style="margin-top:10px"><label for="manual-invite-link-${index}">Link di attivazione</label><input class="input" id="manual-invite-link-${index}" value="${escapeHTML(invitation.activationLink)}" readonly /></div><button class="btn btn--secondary btn--sm" type="button" data-action="copy-value" data-value="${escapeHTML(invitation.activationLink)}">${icon("copy", 15)} Copia link</button>`
+              : invitation.error
+                ? `<p class="field-error" style="margin-top:8px">${escapeHTML(invitation.error)}</p>`
+                : `<p class="field-hint" style="margin-top:8px">${invitation.linked ? "L’account esistente ora accede alla famiglia." : "Il messaggio è stato affidato al servizio e-mail."}</p>`}
+          </div>
+        `;
+      })
+      .join("");
+    openModal({
+      title: studentUpdated ? "Allievo aggiornato" : "Allievo aggiunto",
+      subtitle: "Esito degli accessi famiglia.",
+      className: "modal--sm",
+      body: rows,
+      footer: '<button class="btn btn--primary" type="button" data-action="close-modal">Ho finito</button>',
+    });
+  }
+
   async function handleInviteFamilyAction(actionTarget) {
     setButtonLoading(actionTarget, true, "Invio…");
     try {
@@ -5224,6 +5561,8 @@
       openInvoiceModal();
     } else if (action === "view-invoice") {
       openInvoiceDetails(actionTarget.dataset.invoiceId);
+    } else if (action === "open-void-invoice") {
+      openVoidInvoiceModal(actionTarget.dataset.invoiceId);
     } else if (action === "confirm-bank-notice") {
       if (
         !window.confirm(
@@ -5430,6 +5769,10 @@
       openEditLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "mark-invoice-paid") {
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
+    } else if (action === "open-void-invoice") {
+      openVoidInvoiceModal(actionTarget.dataset.invoiceId);
+    } else if (action === "open-cancel-payment") {
+      openCancelManualPaymentModal(actionTarget.dataset.paymentId);
     } else if (action === "open-cancel-lesson") {
       openCancelLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "create-makeup-lesson") {
@@ -5581,28 +5924,56 @@
         ) {
           throw new Error("Il codice fiscale deve contenere 16 caratteri.");
         }
+        const primaryEmail = normalizeEmailList([values.email])[0] || "";
+        const additionalEmails = normalizeEmailList(values.additional_emails);
+        const invalidEmails = [primaryEmail, ...additionalEmails].filter(
+          (email) => email && !isValidEmail(email),
+        );
+        if (invalidEmails.length) {
+          throw new Error(`Controlla questi indirizzi e-mail: ${invalidEmails.join(", ")}.`);
+        }
+        if (additionalEmails.length > 10) {
+          throw new Error("Puoi aggiungere al massimo 10 nuovi indirizzi alla volta.");
+        }
+        values.email = primaryEmail;
+        const currentStudent = values.id
+          ? state.data.students.find((item) => item.id === values.id)
+          : null;
+        const selectedFamily = state.data.families.find(
+          (item) =>
+            item.id ===
+            (values.family_id || currentStudent?.family_id || ""),
+        );
+        const alreadyLinked = new Set(
+          familyLinkedAccessEmails(selectedFamily),
+        );
+        values.invite_emails = normalizeEmailList([
+          primaryEmail,
+          ...additionalEmails,
+        ]).filter((email) => !alreadyLinked.has(email));
         const result = await state.store.saveStudent(values);
         closeModal();
         await refreshData();
-        if (values.id) {
+        const invitations = result.invitations || [];
+        if (
+          invitations.some(
+            (item) => item.activationLink || (item.error && !item.activationLink),
+          )
+        ) {
+          openInvitationResults(invitations, Boolean(values.id));
+        } else if (values.id && !invitations.length) {
           toast("Allievo aggiornato", "Le modifiche sono state salvate.");
-        } else if (result.activationLink) {
-          openManualInvitationLink(result.activationLink, values.email);
-        } else if (result.inviteError) {
+        } else if (invitations.length && invitations.every((item) => item.linked)) {
           toast(
-            "Allievo aggiunto, invito non inviato",
-            result.inviteError,
-            "error",
+            values.id ? "Accessi collegati" : "Allievo aggiunto",
+            "Gli account esistenti sono stati collegati alla famiglia.",
           );
-        } else if (result.linkedExistingUser) {
+        } else if (invitations.length) {
           toast(
-            "Allievo aggiunto",
-            "Il profilo famiglia esistente è stato collegato.",
-          );
-        } else if (result.inviteSent) {
-          toast(
-            "Allievo aggiunto",
-            "L’invito è stato inviato all’e-mail della famiglia.",
+            values.id ? "Allievo aggiornato" : "Allievo aggiunto",
+            invitations.length === 1
+              ? "L’invito è stato inviato."
+              : `${invitations.length} inviti sono stati preparati in sequenza.`,
           );
         } else {
           toast("Allievo aggiunto", "I dati sono stati salvati.");
@@ -5713,6 +6084,26 @@
         toast(
           "Scadenza creata",
           "La famiglia può ora visualizzarla nella propria area.",
+        );
+      } else if (formId === "void-invoice-form") {
+        const reason = String(values.reason || "").trim();
+        if (!reason) throw new Error("Indica il motivo dell’annullamento.");
+        await state.store.voidInvoice(values.invoice_id, reason);
+        closeModal();
+        await refreshData();
+        toast(
+          "Scadenza eliminata",
+          "È stata annullata e nascosta alle famiglie; lo storico resta conservato.",
+        );
+      } else if (formId === "cancel-payment-form") {
+        const reason = String(values.reason || "").trim();
+        if (!reason) throw new Error("Indica il motivo dell’annullamento.");
+        await state.store.cancelManualPayment(values.payment_id, reason);
+        closeModal();
+        await refreshData();
+        toast(
+          "Incasso annullato",
+          "Il saldo è stato ricalcolato e il movimento resta nello storico.",
         );
       } else if (formId === "mark-paid-form") {
         await state.store.markInvoicePaid(

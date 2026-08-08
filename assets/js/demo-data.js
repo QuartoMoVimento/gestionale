@@ -55,6 +55,42 @@
       },
     ];
 
+    const familyUsers = [
+      {
+        family_id: "fam-1",
+        user_id: "demo-user-1",
+        is_primary: true,
+        relationship: "Genitore",
+        profile: {
+          email: "giulia.bianchi@example.com",
+          display_name: "Giulia Bianchi",
+          is_active: true,
+        },
+      },
+      {
+        family_id: "fam-1",
+        user_id: "demo-user-2",
+        is_primary: false,
+        relationship: "Genitore",
+        profile: {
+          email: "andrea.bianchi@example.com",
+          display_name: "Andrea Bianchi",
+          is_active: true,
+        },
+      },
+      ...families.slice(1).map((family, index) => ({
+        family_id: family.id,
+        user_id: `demo-user-${index + 3}`,
+        is_primary: true,
+        relationship: "Genitore",
+        profile: {
+          email: family.email,
+          display_name: family.guardian_name,
+          is_active: true,
+        },
+      })),
+    ];
+
     const students = [
       {
         id: "stu-1",
@@ -442,6 +478,7 @@
 
     return {
       families,
+      familyUsers,
       students,
       courses,
       enrollments,

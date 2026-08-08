@@ -573,6 +573,13 @@ h4 {
   font-size: 12px;
 }
 
+.field-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .input,
 .select,
 .textarea {

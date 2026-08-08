@@ -291,6 +291,17 @@ Deno.serve(async (request) => {
     if (!EMAIL_PATTERN.test(email) || email.length > 254) {
       return errorResponse(request, "Email non valida", 400, "invalid_email");
     }
+    if (
+      body.is_primary !== undefined &&
+      typeof body.is_primary !== "boolean"
+    ) {
+      return errorResponse(
+        request,
+        "Indicatore di contatto principale non valido",
+        400,
+        "invalid_primary_flag",
+      );
+    }
 
     const { data: family, error: familyError } = await admin
       .from("families")
@@ -306,7 +317,7 @@ Deno.serve(async (request) => {
     // qui sotto gestisce anche utenti Auth preesistenti/orfani e reinviti.
     const { data: existingProfile, error: profileError } = await admin
       .from("profiles")
-      .select("id,email,is_active")
+      .select("id,email,is_active,role")
       .ilike("email", email)
       .maybeSingle();
     if (profileError) throw profileError;
@@ -319,12 +330,20 @@ Deno.serve(async (request) => {
         "user_inactive",
       );
     }
+    if (existingProfile && existingProfile.role !== "family") {
+      return errorResponse(
+        request,
+        "Questo indirizzo appartiene a un account amministrativo e non può essere collegato a una famiglia",
+        409,
+        "user_role_invalid",
+      );
+    }
 
     const redirectTo = allowedRedirect(body.redirect_to);
     const inviteOptions = {
       ...(redirectTo ? { redirectTo } : {}),
       data: {
-        display_name: displayName || family.display_name,
+        ...(displayName ? { display_name: displayName } : {}),
         invited_for_family_id: familyId,
       },
     };
@@ -422,7 +441,7 @@ Deno.serve(async (request) => {
       admin,
       authUser,
       email,
-      displayName || family.display_name,
+      displayName || email.split("@")[0] || family.display_name,
     );
     if (!profileState.isActive) {
       return errorResponse(
@@ -434,28 +453,73 @@ Deno.serve(async (request) => {
     }
     const invitedUserId = authUser.id;
 
-    const { error: updateError } = await admin
-      .from("profiles")
-      .update({
-        ...(displayName ? { display_name: displayName } : {}),
-        ...(body.phone ? { phone: String(body.phone).trim() } : {}),
-      })
-      .eq("id", invitedUserId);
-    if (updateError) throw updateError;
+    const profileUpdates = {
+      ...(displayName ? { display_name: displayName } : {}),
+      ...(body.phone ? { phone: String(body.phone).trim() } : {}),
+    };
+    if (!existingProfile && Object.keys(profileUpdates).length) {
+      const { error: updateError } = await admin
+        .from("profiles")
+        .update(profileUpdates)
+        .eq("id", invitedUserId);
+      if (updateError) throw updateError;
+    }
 
-    const { error: linkError } = await admin
-      .from("family_users")
-      .upsert(
-        {
-          family_id: familyId,
-          user_id: invitedUserId,
-          relationship: body.relationship
-            ? String(body.relationship).trim()
-            : null,
-          is_primary: Boolean(body.is_primary),
-        },
-        { onConflict: "family_id,user_id" },
-      );
+    const { data: existingFamilyLink, error: existingFamilyLinkError } =
+      await admin
+        .from("family_users")
+        .select("family_id,user_id")
+        .eq("family_id", familyId)
+        .eq("user_id", invitedUserId)
+        .maybeSingle();
+    if (existingFamilyLinkError) throw existingFamilyLinkError;
+
+    let linkError: { code?: string; message?: string } | null = null;
+    if (existingFamilyLink) {
+      const familyLinkUpdates: Record<string, unknown> = {};
+      if (body.relationship !== undefined) {
+        familyLinkUpdates.relationship =
+          String(body.relationship).trim() || null;
+      }
+      if (body.is_primary !== undefined) {
+        familyLinkUpdates.is_primary = Boolean(body.is_primary);
+      }
+      if (Object.keys(familyLinkUpdates).length) {
+        const result = await admin
+          .from("family_users")
+          .update(familyLinkUpdates)
+          .eq("family_id", familyId)
+          .eq("user_id", invitedUserId);
+        linkError = result.error;
+      }
+    } else {
+      const familyLink: Record<string, unknown> = {
+        family_id: familyId,
+        user_id: invitedUserId,
+      };
+      if (body.relationship !== undefined) {
+        familyLink.relationship = String(body.relationship).trim() || null;
+      }
+      if (body.is_primary !== undefined) {
+        familyLink.is_primary = Boolean(body.is_primary);
+      }
+      const result = await admin
+        .from("family_users")
+        .insert(familyLink);
+      linkError = result.error;
+      // Un invito concorrente può aver creato la stessa associazione.
+      if (linkError?.code === "23505") {
+        const { data: concurrentFamilyLink, error: concurrentFamilyLinkError } =
+          await admin
+            .from("family_users")
+            .select("family_id,user_id")
+            .eq("family_id", familyId)
+            .eq("user_id", invitedUserId)
+            .maybeSingle();
+        if (concurrentFamilyLinkError) throw concurrentFamilyLinkError;
+        if (concurrentFamilyLink) linkError = null;
+      }
+    }
     if (linkError) throw linkError;
 
     return jsonResponse(request, {

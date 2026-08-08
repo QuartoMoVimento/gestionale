@@ -51,6 +51,10 @@ max_frequency = "1m"
 otp_length = 8
 otp_expiry = 3600
 
+[auth.email.template.invite]
+subject = "Il tuo accesso a Quarto MoVimento"
+content_path = "./supabase/templates/invite.html"
+
 [auth.sms]
 enable_signup = false
 enable_confirmations = false

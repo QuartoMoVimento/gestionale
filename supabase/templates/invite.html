@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Il tuo accesso a Quarto MoVimento</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f3f7f8;color:#17324d;font-family:Arial,sans-serif">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f7f8">
+      <tr>
+        <td align="center" style="padding:32px 16px">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;overflow:hidden;border:1px solid #d8e3e7;border-radius:20px;background:#ffffff">
+            <tr>
+              <td align="center" style="padding:30px 28px 18px">
+                <img src="https://gestionale.quartomovimento.it/assets/img/logo-quarto-movimento-full.png" width="230" alt="Quarto MoVimento" style="display:block;max-width:100%;height:auto" />
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 36px 38px">
+                <p style="margin:0 0 10px;color:#0f8f9f;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase">Area riservata famiglie</p>
+                <h1 style="margin:0 0 18px;color:#08457c;font-family:Georgia,'Times New Roman',serif;font-size:32px;line-height:1.2">Benvenuta/o in Quarto MoVimento</h1>
+                <p style="margin:0 0 14px;font-size:16px;line-height:1.65">Ciao{{ if .Data.display_name }} {{ .Data.display_name }}{{ end }},</p>
+                <p style="margin:0 0 24px;font-size:16px;line-height:1.65">Valeria ti ha invitato nell’area famiglia, dove potrai consultare lezioni, presenze, recuperi e pagamenti.</p>
+                <table role="presentation" cellspacing="0" cellpadding="0">
+                  <tr>
+                    <td style="border-radius:12px;background:#08457c">
+                      <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 22px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none">Attiva il mio accesso</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:24px 0 0;color:#627587;font-size:13px;line-height:1.55">Il collegamento è personale e temporaneo. Se non ti aspettavi questo invito, puoi ignorare il messaggio.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 36px;background:#08457c;color:#ffffff;font-size:12px;line-height:1.5">Quarto MoVimento · Musica, relazione e crescita</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

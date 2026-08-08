@@ -24,11 +24,13 @@ Il progetto usa:
 
 Area amministrativa:
 
-- anagrafica di famiglie e allievi, inclusi codice fiscale e residenza;
+- anagrafica di famiglie e allievi, inclusi codice fiscale, residenza e più
+  accessi e-mail per lo stesso nucleo;
 - calendario delle lezioni ordinarie e dei recuperi;
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
-- scadenze, pagamenti, bonifici da verificare e stato dei saldi;
+- scadenze, pagamenti, bonifici da verificare, annullamenti tracciati e stato
+  dei saldi;
 - notifiche inviate dalle famiglie nella dashboard, con stato letto/risolto;
 - invito sicuro dei familiari, senza registrazione pubblica.
 
@@ -134,9 +136,13 @@ produzione. La procedura ufficiale è descritta in
 Lo schema è versionato nelle migrazioni SQL: `001_initial_schema.sql` crea il
 modello applicativo, `002_first_admin_bootstrap.sql` aggiunge il bootstrap
 vincolato della prima amministratrice, `003`–`005` consolidano privilegi e
-attribuzione delle operazioni e `006` aggiunge anagrafica estesa, nuovi piani,
-archiviazione sicura e notifiche famiglia–admin. Non creare manualmente in
-produzione tabelle o procedure che divergano dalle migrazioni.
+attribuzione delle operazioni, `006` aggiunge anagrafica estesa, nuovi piani,
+archiviazione sicura e notifiche famiglia–admin, `007`–`009` contengono le
+riconciliazioni intermedie per recuperi e bonifici e `010` introduce
+annullamenti contabili tracciati e restringe la visibilità delle associazioni
+tra familiari.
+Non creare manualmente in produzione tabelle o procedure che divergano dalle
+migrazioni.
 
 Dopo aver collegato il progetto, controllare prima cosa verrebbe applicato:
 
@@ -178,6 +184,16 @@ Nel Dashboard Supabase:
 5. usare successivamente la funzione `invite-family`: l'invito di utenti è
    un'operazione privilegiata e non deve essere implementato dal browser con una
    service key.
+
+Il template di invito personalizzato è versionato in
+`supabase/templates/invite.html` e collegato da `supabase/config.toml`. Nei
+progetti Free creati dal 3 giugno 2026 Supabase non consente però di
+personalizzare i template mentre si usa il servizio SMTP predefinito: questo
+progetto richiede quindi un SMTP personalizzato (oppure un piano a pagamento)
+prima di poter attivare il messaggio con logo e testi Quarto MoVimento. Vedere
+[Auth email templates](https://supabase.com/docs/guides/auth/auth-email-templates),
+[Custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp) e
+[la modifica per il piano Free](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
 
 Gli URL di redirect devono essere autorizzati esattamente; in produzione è
 preferibile evitare wildcard. Vedere
