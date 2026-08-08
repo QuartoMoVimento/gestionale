@@ -460,7 +460,7 @@
         bank_account_holder: "Valeria d’Argenio",
         bank_iban: "IT00 X000 0000 0000 0000 0000 000",
         bank_bic: "DEMOIT00",
-        bank_reference_template: "Quota corso · {allievo} · {numero}",
+        bank_reference_template: "{nome}, {cognome}, {numero}",
         academic_year_label: "Anno didattico in corso",
         absence_notice_hours: 24,
       },

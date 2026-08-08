@@ -37,7 +37,7 @@ Area famiglia:
 - calendario delle lezioni;
 - riepilogo di presenze, assenze e recuperi;
 - scadenze e pagamenti della propria famiglia;
-- pagamento PayPal, segnalazione di un bonifico e notifiche a Valeria;
+- pagamento PayPal, coordinate per il bonifico e notifiche a Valeria;
 - contatto diretto via WhatsApp e prenotazione di un colloquio.
 
 ## Architettura e responsabilità di sicurezza
@@ -445,16 +445,18 @@ browser reale controllando che la console non mostri risorse bloccate.
 
 ## Bonifico
 
-La famiglia può segnalare un bonifico, ma la segnalazione non equivale a un
-pagamento confermato. Solo l'amministratrice, dopo il riscontro bancario, deve
-marcarlo come pagato. Importo e causale vanno generati dalla scadenza.
+La famiglia vede importo, coordinate bancarie e una causale già compilata nel
+formato `nome, cognome, numero fattura`. Non invia una segnalazione separata dal
+gestionale: solo l'amministratrice, dopo il riscontro bancario, marca la fattura
+come pagata.
 
 Dopo la migrazione, compilare dall'area **Impostazioni** dell'app i valori
 `bank_account_holder`, `bank_iban`, l'eventuale `bank_bic` e
-`bank_reference_template`. Le righe iniziali sono vuote e hanno visibilità
-`authenticated`: possono essere lette da utenti che hanno effettuato l'accesso,
-ma non da visitatori anonimi. Non cambiare la visibilità in `public` e non
-inserire questi dati in JavaScript, README o dati demo.
+`bank_reference_template`. Le coordinate bancarie iniziali sono vuote; il
+modello causale viene impostato su `{nome}, {cognome}, {numero}`. Questi valori
+hanno visibilità `authenticated`: possono essere letti da utenti che hanno
+effettuato l'accesso, ma non da visitatori anonimi. Non cambiare la visibilità
+in `public` e non inserire coordinate reali in JavaScript, README o dati demo.
 
 ## Privacy e dati di minori
 

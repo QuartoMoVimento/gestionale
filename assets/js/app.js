@@ -19,6 +19,7 @@
   const TIDYCAL_URL = "https://tidycal.com/quartomov/chiamata-informativa";
   const PAYPAL_ME_URL =
     "https://paypal.me/quartomov?locale.x=it_IT&country.x=IT";
+  const BANK_REFERENCE_TEMPLATE = "{nome}, {cognome}, {numero}";
   const ADMIN_ROUTES = [
     "overview",
     "attendance",
@@ -3016,7 +3017,7 @@
         <div class="mobile-row__meta">
           <div><span>Da saldare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
           <div><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
-          <div><span>Numero</span><strong>${escapeHTML(invoice.number)}</strong></div>
+          <div><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
           <div><span>Azione</span>${!["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>Verifica il bonifico</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
         </div>
       </article>
@@ -3255,7 +3256,7 @@
               <div class="field"><label for="bank-holder">Intestatario</label><input class="input" id="bank-holder" name="bank_account_holder" value="${escapeHTML(settings.bank_account_holder || "")}" /></div>
               <div class="field"><label for="bank-iban">IBAN</label><input class="input" id="bank-iban" name="bank_iban" value="${escapeHTML(settings.bank_iban || "")}" autocomplete="off" /></div>
               <div class="field"><label for="bank-bic">BIC/SWIFT</label><input class="input" id="bank-bic" name="bank_bic" value="${escapeHTML(settings.bank_bic || "")}" /></div>
-              <div class="field"><label for="bank-reference">Modello causale</label><input class="input" id="bank-reference" name="bank_reference_template" value="${escapeHTML(settings.bank_reference_template || "Quota corso · {allievo} · {numero}")}" /></div>
+              <div class="field"><label for="bank-reference">Modello causale</label><input class="input" id="bank-reference" name="bank_reference_template" value="${escapeHTML(settings.bank_reference_template || BANK_REFERENCE_TEMPLATE)}" /><p class="field-hint">Usa {nome}, {cognome} e {numero}: la famiglia vedrà la causale già compilata.</p></div>
             </div>
           </div>
           <div class="setting-section">
@@ -3765,11 +3766,12 @@
     const settings = state.data.settings || {};
     const student = studentForInvoice(invoice);
     const reference = String(
-      settings.bank_reference_template ||
-        "Quota corso · {allievo} · {numero}",
+      settings.bank_reference_template || BANK_REFERENCE_TEMPLATE,
     )
-      .replace("{allievo}", fullName(student))
-      .replace("{numero}", invoice.number || "");
+      .replace(/\{nome\}/gi, student?.first_name || "")
+      .replace(/\{cognome\}/gi, student?.last_name || "")
+      .replace(/\{allievo\}/gi, fullName(student))
+      .replace(/\{numero(?:\s+fattura)?\}/gi, invoice.number || "");
     return `
       <div class="bank-box">
         <div class="bank-box__row"><span>Intestatario</span><strong>${escapeHTML(settings.bank_account_holder || "Da comunicare")}</strong></div>
@@ -3815,7 +3817,7 @@
           <header class="card-header"><div><h2>Pagamento sicuro</h2><p>PayPal oppure bonifico bancario</p></div></header>
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("card", 16)}</span><span class="activity-copy"><strong>PayPal</strong><span>Paga dal profilo PayPal di Quarto MoVimento.</span></span><a class="btn btn--yellow btn--sm" href="${PAYPAL_ME_URL}" target="_blank" rel="noopener noreferrer">Apri PayPal</a></div>
-            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>Segnalalo dall’app; Valeria lo verificherà.</span></span></div>
+            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>Usa come causale nome, cognome e numero fattura.</span></span></div>
           </div>
           <p class="subtle" style="margin:12px 0 0;font-size:10px">I dati PayPal sono gestiti da PayPal. L’app non memorizza dati di carta.</p>
         </article>
@@ -4350,7 +4352,7 @@
             <div class="field field--full"><label for="invoice-description">Descrizione</label><input class="input" id="invoice-description" name="description" placeholder="Facoltativa" /></div>
             <div class="field"><label for="invoice-amount">Importo (€)</label><input class="input" id="invoice-amount" name="amount_eur" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div>
             <div class="field"><label for="invoice-due">Scadenza</label><input class="input" id="invoice-due" name="due_date" type="date" value="${escapeHTML(todayKey())}" required /></div>
-            <div class="field field--full"><label for="invoice-number">Numero/riferimento</label><input class="input" id="invoice-number" name="number" placeholder="Generato automaticamente se vuoto" /></div>
+            <div class="field field--full"><label for="invoice-number">Numero fattura</label><input class="input" id="invoice-number" name="number" placeholder="Generato automaticamente se lasciato vuoto" /></div>
           </div>
         </form>
       `,
@@ -4381,6 +4383,7 @@
       className: "modal--sm",
       body: `
         <div class="bank-box">
+          <div class="bank-box__row"><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
           <div class="bank-box__row"><span>Importo totale</span><strong>${escapeHTML(formatMoney(invoice.total_cents, invoice.currency))}</strong></div>
           <div class="bank-box__row"><span>Incassato</span><strong>${escapeHTML(formatMoney(invoicePaidCents(invoice), invoice.currency))}</strong></div>
           <div class="bank-box__row"><span>Da incassare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))} ${statusBadge("invoice", status)}</strong></div>
@@ -4557,21 +4560,12 @@
           </section>
           <section>
             <h3 style="font-size:15px;margin-bottom:5px">Oppure fai un bonifico</h3>
-            <p class="muted" style="font-size:11px;margin-bottom:15px">Usa la causale indicata e poi segnala l’operazione.</p>
+            <p class="muted" style="font-size:11px;margin-bottom:15px">La causale deve riportare, in quest’ordine: <strong>nome, cognome, numero fattura</strong>. Puoi copiare quella già compilata qui sotto.</p>
             ${bankDetails(invoice)}
           </section>
         </div>
-        <form id="bank-notice-form" class="setting-section">
-          <input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />
-          <h3>Hai già fatto il bonifico?</h3>
-          <p>Invia la segnalazione: lo stato resterà “in verifica” fino al controllo dell’accredito.</p>
-          <div class="form-grid">
-            <div class="field"><label for="transfer-date">Data del bonifico</label><input class="input" id="transfer-date" name="transfer_date" type="date" value="${escapeHTML(todayKey())}" required /></div>
-            <div class="field"><label for="transfer-reference">Riferimento/CRO (facoltativo)</label><input class="input" id="transfer-reference" name="reference" autocomplete="off" /></div>
-          </div>
-        </form>
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--primary" type="submit" form="bank-notice-form">${icon("bank", 15)} Segnala bonifico</button>`,
+      footer: `<button class="btn btn--primary" type="button" data-action="close-modal">Chiudi</button>`,
     });
     if (
       state.mode === "production" &&
@@ -5737,7 +5731,7 @@
         await refreshData();
         toast(
           "Segnalazione rifiutata",
-          "La famiglia vedrà il motivo e potrà inviare una nuova segnalazione.",
+          "La famiglia vedrà il motivo e la scadenza tornerà da pagare.",
         );
       } else if (formId === "settings-school-form") {
         await state.store.saveSettings(values);
@@ -5756,18 +5750,6 @@
         toast(
           "Dati di pagamento salvati",
           "Le famiglie vedranno le nuove coordinate.",
-        );
-      } else if (formId === "bank-notice-form") {
-        await state.store.submitBankNotice({
-          invoiceId: values.invoice_id,
-          transferDate: values.transfer_date,
-          reference: values.reference,
-        });
-        closeModal();
-        await refreshData();
-        toast(
-          "Bonifico segnalato",
-          "Valeria verificherà l’accredito e aggiornerà lo stato.",
         );
       } else if (formId === "set-password-form") {
         if (values.password !== values.confirm_password) {
