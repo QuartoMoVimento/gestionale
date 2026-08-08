@@ -249,7 +249,7 @@ jobs:
             "_site/manifest.webmanifest"
             "_site/assets/css/styles.css"
             "_site/assets/fonts/nunito-latin.woff2"
-            "_site/assets/fonts/rochester-latin.woff2"
+            "_site/assets/fonts/lora-latin.woff2"
             "_site/assets/img/logo-quarto-movimento-192.png"
             "_site/assets/img/logo-quarto-movimento.png"
             "_site/assets/img/logo-quarto-movimento-full.png"

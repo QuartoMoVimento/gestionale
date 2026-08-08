@@ -12,8 +12,8 @@ Il progetto usa:
 - un frontend statico pubblicabile su GitHub Pages;
 - Supabase per autenticazione, database PostgreSQL, Row Level Security ed Edge
   Functions;
-- PayPal Checkout per i pagamenti online, con creazione e cattura dell'ordine
-  eseguite lato server;
+- collegamento PayPal.Me e, se configurato, PayPal Checkout con creazione e
+  cattura dell'ordine eseguite lato server;
 - conferma manuale dell'amministratrice per i bonifici.
 
 > **Stato del progetto:** la modalità demo contiene esclusivamente dati fittizi.
@@ -24,11 +24,12 @@ Il progetto usa:
 
 Area amministrativa:
 
-- anagrafica di famiglie e allievi;
+- anagrafica di famiglie e allievi, inclusi codice fiscale e residenza;
 - calendario delle lezioni ordinarie e dei recuperi;
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, bonifici da verificare e stato dei saldi;
+- notifiche inviate dalle famiglie nella dashboard, con stato letto/risolto;
 - invito sicuro dei familiari, senza registrazione pubblica.
 
 Area famiglia:
@@ -36,7 +37,8 @@ Area famiglia:
 - calendario delle lezioni;
 - riepilogo di presenze, assenze e recuperi;
 - scadenze e pagamenti della propria famiglia;
-- pagamento PayPal e segnalazione di un bonifico.
+- pagamento PayPal, segnalazione di un bonifico e notifiche a Valeria;
+- contatto diretto via WhatsApp e prenotazione di un colloquio.
 
 ## Architettura e responsabilità di sicurezza
 
@@ -130,9 +132,11 @@ produzione. La procedura ufficiale è descritta in
 ## Migrazioni database
 
 Lo schema è versionato nelle migrazioni SQL: `001_initial_schema.sql` crea il
-modello applicativo e `002_first_admin_bootstrap.sql` aggiunge il bootstrap
-vincolato della prima amministratrice. Non creare manualmente in produzione
-tabelle o procedure che divergano dalle migrazioni.
+modello applicativo, `002_first_admin_bootstrap.sql` aggiunge il bootstrap
+vincolato della prima amministratrice, `003`–`005` consolidano privilegi e
+attribuzione delle operazioni e `006` aggiunge anagrafica estesa, nuovi piani,
+archiviazione sicura e notifiche famiglia–admin. Non creare manualmente in
+produzione tabelle o procedure che divergano dalle migrazioni.
 
 Dopo aver collegato il progetto, controllare prima cosa verrebbe applicato:
 
@@ -163,7 +167,10 @@ Nel Dashboard Supabase:
      `https://gestionale.quartomovimento.it/`;
    - redirect locali aggiuntivi: `http://localhost:5173/**` e
      `http://127.0.0.1:5173/**`;
-3. personalizzare i template email di invito e recupero password;
+3. configurare un server SMTP personalizzato in **Authentication → SMTP
+   Settings**, con mittente verificato, quindi personalizzare i template email
+   di invito e recupero password. Senza SMTP l'app genera per l'amministratrice
+   un link di attivazione manuale da condividere in modo riservato;
 4. creare o invitare dal Dashboard l'account Auth della prima amministratrice
    con indirizzo `quartomov@gmail.com`, senza salvare password nel repository,
    quindi assegnargli ruolo e nome visualizzato come indicato nella sezione
@@ -417,7 +424,7 @@ contenuto restituito dal CDN non corrisponde ai byte verificati. Non sostituire
 il percorso con l'alias dinamico `.min.js` senza ricalcolare e collaudare
 l'integrità.
 
-Rochester e Nunito sono inclusi localmente in `assets/fonts`, insieme ai logo
+Lora e Nunito sono inclusi localmente in `assets/fonts`, insieme ai logo
 ufficiali in `assets/img`: il browser non contatta Google Fonts o il sito
 pubblico per caricarli. Il PayPal JavaScript SDK non usa SRI perché è una
 risposta dinamica legata ai parametri del merchant; la CSP ne limita comunque

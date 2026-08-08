@@ -62,6 +62,8 @@
         first_name: "Emma",
         last_name: "Bianchi",
         birth_date: "2022-04-18",
+        fiscal_code: "BNCMMA22D58G702X",
+        residence_address: "Via delle Note 12, Pisa",
         notes: "Ama le attività con il paracadute.",
         is_active: true,
       },
@@ -146,6 +148,7 @@
         plan_type: "annual",
         starts_on: isoDay(-120),
         ends_on: isoDay(240),
+        notes: "Pagamento annuale in due rate.",
         is_active: true,
       },
       {
@@ -425,6 +428,18 @@
       },
     ];
 
+    const familyNotifications = [
+      {
+        id: "family-notification-1",
+        family_id: "fam-1",
+        student_id: "stu-1",
+        kind: "schedule",
+        message: "Possiamo verificare insieme l’orario della prossima lezione?",
+        status: "unread",
+        created_at: isoTime(-1, 19, 15),
+      },
+    ];
+
     return {
       families,
       students,
@@ -436,6 +451,7 @@
       payments,
       bankTransferNotices,
       makeupCredits,
+      familyNotifications,
       settings: {
         school_name: "Studio Quarto MoVimento",
         school_address: "Via di Novecchio, 10 · Pisa",

@@ -14,6 +14,11 @@
 
   const ROLE_ADMIN = "admin";
   const ROLE_FAMILY = "family";
+  const WHATSAPP_URL =
+    "https://api.whatsapp.com/send/?phone=%2B393277749860&text&type=phone_number&app_absent=0";
+  const TIDYCAL_URL = "https://tidycal.com/quartomov/chiamata-informativa";
+  const PAYPAL_ME_URL =
+    "https://paypal.me/quartomov?locale.x=it_IT&country.x=IT";
   const ADMIN_ROUTES = [
     "overview",
     "attendance",
@@ -53,6 +58,7 @@
     },
     settingsTab: "school",
     authListener: null,
+    notificationsChannel: null,
     authFingerprint: null,
     lastDataRefreshAt: 0,
   };
@@ -421,13 +427,26 @@
     );
   }
 
+  function supportActions(includeNotification) {
+    return `
+      <div class="support-actions">
+        <a class="btn btn--secondary btn--sm" href="${WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${icon("help", 15)} Parlane con Valeria</a>
+        <a class="btn btn--secondary btn--sm" href="${TIDYCAL_URL}" target="_blank" rel="noopener noreferrer">${icon("calendar", 15)} Fissa un colloquio</a>
+        ${includeNotification ? `<button class="btn btn--primary btn--sm" type="button" data-action="open-family-notification">${icon("bell", 15)} Invia una notifica</button>` : ""}
+      </div>
+    `;
+  }
+
   const LABELS = {
     plan: {
+      trial: "Lezione di prova",
+      trial_package_2: "Pacchetto prova · 2 lezioni",
       monthly: "Mensile",
+      quarterly: "Trimestrale",
       semester: "Semestrale",
       annual: "Annuale",
-      trial: "Prova",
       workshop: "Laboratorio",
+      custom: "Personalizzato",
     },
     attendance: {
       present: "Presente",
@@ -471,6 +490,13 @@
       bank_transfer: "bonifico",
       cash: "contanti",
       other: "altro",
+    },
+    notificationKind: {
+      general: "Comunicazione",
+      absence: "Assenza",
+      schedule: "Lezioni e orari",
+      makeup: "Recupero",
+      payment: "Pagamento",
     },
   };
 
@@ -544,7 +570,7 @@
   function recoveryAllowedForEnrollment(enrollment) {
     return (
       enrollment?.recovery_allowed ??
-      ["annual", "semester"].includes(enrollment?.plan_type)
+      ["quarterly", "annual", "semester"].includes(enrollment?.plan_type)
     );
   }
 
@@ -820,7 +846,9 @@
       if (role === ROLE_FAMILY) {
         const familyId = "fam-1";
         const studentIds = copy.students
-          .filter((item) => item.family_id === familyId)
+          .filter(
+            (item) => item.family_id === familyId && item.is_active !== false,
+          )
           .map((item) => item.id);
         copy.families = copy.families.filter((item) => item.id === familyId);
         copy.students = copy.students.filter((item) =>
@@ -854,6 +882,9 @@
         );
         copy.makeupCredits = copy.makeupCredits.filter((item) =>
           studentIds.includes(item.student_id),
+        );
+        copy.familyNotifications = (copy.familyNotifications || []).filter(
+          (item) => item.family_id === familyId,
         );
       }
       return copy;
@@ -904,6 +935,10 @@
         first_name: payload.first_name,
         last_name: payload.last_name,
         birth_date: payload.birth_date || null,
+        fiscal_code: String(payload.fiscal_code || "")
+          .trim()
+          .toUpperCase(),
+        residence_address: payload.residence_address || "",
         notes: payload.notes || "",
         is_active: true,
       };
@@ -928,6 +963,7 @@
           plan_type: payload.plan_type || "monthly",
           starts_on: payload.starts_on || todayKey(),
           ends_on: payload.ends_on || null,
+          notes: payload.enrollment_notes || "",
           is_active: true,
         };
         if (enrollment) Object.assign(enrollment, values);
@@ -1010,7 +1046,9 @@
             );
             const recoveryAllowed =
               enrollment?.recovery_allowed ??
-              ["annual", "semester"].includes(enrollment?.plan_type);
+              ["quarterly", "annual", "semester"].includes(
+                enrollment?.plan_type,
+              );
             const notifiedInTime =
               absenceNotifiedAt &&
               new Date(absenceNotifiedAt) <=
@@ -1205,6 +1243,74 @@
       return course;
     }
 
+    async archiveStudent(studentId) {
+      const student = this.data.students.find((item) => item.id === studentId);
+      if (!student) throw new Error("Allievo non trovato.");
+      student.is_active = false;
+      this.data.enrollments.forEach((enrollment) => {
+        if (enrollment.student_id === studentId && enrollment.is_active !== false) {
+          enrollment.is_active = false;
+          enrollment.ends_on = enrollment.ends_on || todayKey();
+        }
+      });
+      this.data.makeupCredits.forEach((credit) => {
+        if (
+          credit.student_id === studentId &&
+          ["available", "proposed", "scheduled"].includes(credit.status)
+        ) {
+          credit.status = "cancelled";
+          credit.reason = "Allievo eliminato dall’anagrafica attiva";
+        }
+      });
+    }
+
+    async archiveCourse(courseId) {
+      const course = this.data.courses.find((item) => item.id === courseId);
+      if (!course) throw new Error("Corso non trovato.");
+      course.is_active = false;
+      this.data.enrollments.forEach((enrollment) => {
+        if (enrollment.course_id === courseId && enrollment.is_active !== false) {
+          enrollment.is_active = false;
+          enrollment.ends_on = enrollment.ends_on || todayKey();
+        }
+      });
+      this.data.lessons.forEach((lesson) => {
+        if (
+          lesson.course_id === courseId &&
+          lesson.status === "scheduled" &&
+          new Date(lesson.starts_at) >= new Date()
+        ) {
+          lesson.status = "cancelled_other";
+          lesson.cancellation_reason = "Corso eliminato";
+        }
+      });
+    }
+
+    async submitFamilyNotification(payload) {
+      const notification = {
+        id: `notification-${Date.now()}`,
+        family_id: payload.family_id,
+        student_id: payload.student_id || null,
+        kind: payload.kind || "general",
+        message: payload.message,
+        status: "unread",
+        created_at: new Date().toISOString(),
+      };
+      this.data.familyNotifications = this.data.familyNotifications || [];
+      this.data.familyNotifications.unshift(notification);
+      return notification;
+    }
+
+    async updateFamilyNotification(notificationId, status) {
+      const notification = (this.data.familyNotifications || []).find(
+        (item) => item.id === notificationId,
+      );
+      if (!notification) throw new Error("Notifica non trovata.");
+      notification.status = status;
+      notification.read_at = status === "unread" ? null : new Date().toISOString();
+      return notification;
+    }
+
     async saveInvoice(payload) {
       const invoice = {
         id: `inv-${Date.now()}`,
@@ -1393,7 +1499,7 @@
       return result.data;
     }
 
-    async loadData() {
+    async loadData(role) {
       const [
         families,
         students,
@@ -1405,6 +1511,7 @@
         payments,
         bankTransferNotices,
         makeupCredits,
+        familyNotifications,
         settingRows,
       ] = await Promise.all([
         this.query("families", "*", (query) =>
@@ -1437,6 +1544,9 @@
         this.query("makeup_credits", "*", (query) =>
           query.order("created_at", { ascending: false }),
         ),
+        this.query("family_notifications", "*", (query) =>
+          query.order("created_at", { ascending: false }),
+        ),
         this.query("app_settings", "key,value"),
       ]);
       const settings = Object.fromEntries(
@@ -1444,7 +1554,10 @@
       );
       return {
         families,
-        students,
+        students:
+          role === ROLE_FAMILY
+            ? students.filter((item) => item.is_active !== false)
+            : students,
         courses,
         enrollments,
         lessons,
@@ -1453,6 +1566,7 @@
         payments,
         bankTransferNotices,
         makeupCredits,
+        familyNotifications,
         settings,
       };
     }
@@ -1473,6 +1587,7 @@
       let inviteSent = false;
       let linkedExistingUser = false;
       let inviteError = null;
+      let activationLink = null;
       if (isNew && payload.email) {
         try {
           const invitation = await this.inviteFamily({
@@ -1482,10 +1597,13 @@
           });
           inviteSent = Boolean(invitation?.invitation_sent);
           linkedExistingUser = Boolean(invitation?.linked_existing_user);
+          activationLink =
+            invitation?.manual_invite_url || invitation?.activation_link || null;
         } catch (error) {
           inviteError =
             error?.message ||
             "Allievo salvato, ma non è stato possibile inviare l’invito.";
+          activationLink = error?.activationLink || null;
         }
       }
       return {
@@ -1495,6 +1613,7 @@
         inviteSent,
         linkedExistingUser,
         inviteError,
+        activationLink,
       };
     }
 
@@ -1609,6 +1728,49 @@
         ? this.client.from("courses").update(values).eq("id", payload.id)
         : this.client.from("courses").insert(values);
       const { data, error } = await request.select().single();
+      if (error) throw error;
+      return data;
+    }
+
+    async archiveStudent(studentId) {
+      const { data, error } = await this.client.rpc("admin_archive_student", {
+        p_student_id: studentId,
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async archiveCourse(courseId) {
+      const { data, error } = await this.client.rpc("admin_archive_course", {
+        p_course_id: courseId,
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async submitFamilyNotification(payload) {
+      const { data, error } = await this.client
+        .from("family_notifications")
+        .insert({
+          family_id: payload.family_id,
+          student_id: payload.student_id || null,
+          kind: payload.kind || "general",
+          message: payload.message,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    async updateFamilyNotification(notificationId, status) {
+      const { data, error } = await this.client.rpc(
+        "admin_update_family_notification_status",
+        {
+          p_notification_id: notificationId,
+          p_status: status,
+        },
+      );
       if (error) throw error;
       return data;
     }
@@ -1737,7 +1899,27 @@
           },
         },
       );
-      if (error) throw error;
+      if (error) {
+        let details = null;
+        try {
+          const response = error.context;
+          if (response && typeof response.clone === "function") {
+            details = await response.clone().json();
+          }
+        } catch {
+          details = null;
+        }
+        const inviteError = new Error(
+          details?.message ||
+            details?.error ||
+            error.message ||
+            "Impossibile inviare l’invito alla famiglia.",
+        );
+        inviteError.code = details?.code || "invite_failed";
+        inviteError.activationLink =
+          details?.manual_invite_url || details?.activation_link || null;
+        throw inviteError;
+      }
       return data;
     }
   }
@@ -1775,6 +1957,7 @@
               <button class="copy-button" type="button" data-action="forgot-password">Password dimenticata?</button>
               Per assistenza scrivi a <a href="mailto:${escapeHTML(config.supportEmail || "valeria@quartomovimento.it")}">${escapeHTML(config.supportEmail || "valeria@quartomovimento.it")}</a>.
             </p>
+            ${supportActions(false)}
             ${
               state.mode === "demo"
                 ? `
@@ -1838,8 +2021,11 @@
     const overdue = state.data.invoices.filter(
       (item) => invoiceEffectiveStatus(item) === "overdue",
     ).length;
+    const unreadNotifications = (state.data.familyNotifications || []).filter(
+      (item) => item.status === "unread",
+    ).length;
     return [
-      ["overview", "Riepilogo", "home", null],
+      ["overview", "Riepilogo", "home", unreadNotifications || null],
       ["attendance", "Presenze", "check", null],
       ["students", "Allievi", "users", null],
       ["calendar", "Calendario", "calendar", null],
@@ -1904,9 +2090,9 @@
               state.role === ROLE_FAMILY
                 ? `
                   <div class="sidebar-help">
-                    <strong>Serve una mano?</strong>
-                    <p>Per assenze, cambi orario o dubbi scrivimi direttamente.</p>
-                    <a class="btn btn--secondary btn--sm" href="https://wa.me/${whatsappNumber(supportPhone())}" target="_blank" rel="noopener">Contattami</a>
+                   <strong>Serve una mano?</strong>
+                   <p>Per assenze, cambi orario o dubbi scrivimi direttamente.</p>
+                    ${supportActions(true)}
                   </div>
                 `
                 : ""
@@ -1931,8 +2117,12 @@
             </div>
             <div class="topbar-actions">
               <span class="topbar-date">${escapeHTML(formatLongDate(new Date()))}</span>
-              ${state.role === ROLE_ADMIN ? `<a class="btn btn--secondary btn--icon" href="#/admin/settings" aria-label="Impostazioni">${icon("settings", 18)}</a>` : ""}
-              <a class="btn btn--secondary btn--icon" href="mailto:${escapeHTML(supportEmail())}" aria-label="Contatta Quarto MoVimento">${icon("mail", 18)}</a>
+              ${
+                state.role === ROLE_ADMIN
+                  ? `<a class="btn btn--secondary btn--icon has-notification" href="#/admin/overview" aria-label="${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length ? `${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length} notifiche da leggere` : "Nessuna notifica da leggere"}">${icon("bell", 18)}${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length ? `<span class="notification-count">${Math.min(99, (state.data.familyNotifications || []).filter((item) => item.status === "unread").length)}</span>` : ""}</a><a class="btn btn--secondary btn--icon" href="#/admin/settings" aria-label="Impostazioni">${icon("settings", 18)}</a>`
+                  : ""
+              }
+              ${state.role === ROLE_FAMILY ? `<a class="btn btn--secondary btn--icon" href="mailto:${escapeHTML(supportEmail())}" aria-label="Contatta Quarto MoVimento">${icon("mail", 18)}</a>` : ""}
               <button class="btn btn--secondary btn--icon" type="button" data-action="logout" aria-label="Esci">${icon("logout", 18)}</button>
             </div>
           </header>
@@ -2048,6 +2238,57 @@
     `;
   }
 
+  function renderAdminNotifications() {
+    const notifications = (state.data.familyNotifications || [])
+      .filter((item) => item.status !== "resolved")
+      .sort(
+        (a, b) =>
+          new Date(b.created_at || 0) - new Date(a.created_at || 0),
+      );
+    const unread = notifications.filter((item) => item.status === "unread");
+    return `
+      <section class="card" style="margin-top:18px">
+        <header class="card-header">
+          <div>
+            <h2>Notifiche dalle famiglie</h2>
+            <p>${unread.length ? `${unread.length} ${unread.length === 1 ? "messaggio da leggere" : "messaggi da leggere"}` : "Nessun nuovo messaggio"}</p>
+          </div>
+          ${unread.length ? `<span class="badge badge--warning">${unread.length} nuove</span>` : ""}
+        </header>
+        ${
+          notifications.length
+            ? `<div class="notification-list">${notifications
+                .slice(0, 8)
+                .map((notification) => {
+                  const family = state.data.families.find(
+                    (item) => item.id === notification.family_id,
+                  );
+                  const student = state.data.students.find(
+                    (item) => item.id === notification.student_id,
+                  );
+                  const isUnread = notification.status === "unread";
+                  return `
+                    <article class="notification-item${isUnread ? " is-unread" : ""}">
+                      <span class="notification-dot" aria-hidden="true"></span>
+                      <span class="notification-item__copy">
+                        <strong>${escapeHTML(family?.guardian_name || family?.display_name || "Famiglia")}${student ? ` · ${escapeHTML(fullName(student))}` : ""}</strong>
+                        <span>${escapeHTML(LABELS.notificationKind[notification.kind] || "Comunicazione")} · ${escapeHTML(formatDate(notification.created_at, { day: "numeric", month: "short", year: "numeric" }))} alle ${escapeHTML(formatTime(notification.created_at))}</span>
+                        <p>${escapeHTML(notification.message)}</p>
+                      </span>
+                      <span class="notification-item__actions">
+                        ${isUnread ? `<button class="btn btn--secondary btn--sm" type="button" data-action="update-family-notification" data-notification-id="${escapeHTML(notification.id)}" data-status="read">Segna letta</button>` : ""}
+                        <button class="btn btn--ghost btn--sm" type="button" data-action="update-family-notification" data-notification-id="${escapeHTML(notification.id)}" data-status="resolved">Risolta</button>
+                      </span>
+                    </article>
+                  `;
+                })
+                .join("")}</div>`
+            : `<div class="empty-state"><span class="empty-state__icon">${icon("bell", 22)}</span><h3>Nessuna notifica</h3><p>Quando una famiglia invia un messaggio, lo vedrai qui.</p></div>`
+        }
+      </section>
+    `;
+  }
+
   function renderAdminOverview() {
     const activeStudents = state.data.students.filter(
       (item) => item.is_active !== false,
@@ -2130,6 +2371,8 @@
           "repeat",
         )}
       </section>
+
+      ${renderAdminNotifications()}
 
       <section class="grid grid--dashboard" style="margin-top:18px">
         <article class="card">
@@ -2397,9 +2640,10 @@
     const query = state.filters.studentSearch.trim().toLowerCase();
     return state.data.students
       .filter((student) => {
+        if (student.is_active === false) return false;
         const course = courseForStudent(student.id);
         const family = familyForStudent(student);
-        const haystack = `${fullName(student)} ${family?.guardian_name || ""} ${family?.email || ""}`.toLowerCase();
+        const haystack = `${fullName(student)} ${student.fiscal_code || ""} ${student.residence_address || ""} ${family?.guardian_name || ""} ${family?.email || ""}`.toLowerCase();
         const matchesSearch = !query || haystack.includes(query);
         const matchesCourse =
           state.filters.studentCourse === "all" ||
@@ -2423,7 +2667,10 @@
               <span>${escapeHTML(family?.guardian_name || family?.display_name || "")}</span>
             </span>
           </div>
-          <button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button>
+          <div class="row-actions">
+            <button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button>
+            <button class="row-action" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}" aria-label="Elimina allievo">${icon("trash", 16)}</button>
+          </div>
         </div>
         <div class="mobile-row__meta">
           <div><span>Corso</span><strong>${escapeHTML(course?.name || "—")}</strong></div>
@@ -2453,6 +2700,7 @@
           <select class="select filter-select" id="student-course-filter" aria-label="Filtra per corso">
             <option value="all">Tutti i corsi</option>
             ${state.data.courses
+              .filter((course) => course.is_active !== false)
               .map(
                 (course) =>
                   `<option value="${escapeHTML(course.id)}"${state.filters.studentCourse === course.id ? " selected" : ""}>${escapeHTML(course.name)}</option>`,
@@ -2506,6 +2754,7 @@
                             <div class="row-actions">
                               <button class="row-action" type="button" data-action="view-student" data-student-id="${escapeHTML(student.id)}" aria-label="Apri scheda">${icon("eye", 16)}</button>
                               <button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button>
+                              <button class="row-action" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}" aria-label="Elimina allievo">${icon("trash", 16)}</button>
                             </div>
                           </td>
                         </tr>
@@ -3022,13 +3271,14 @@
               <thead><tr><th>Corso</th><th>Durata</th><th>Sede</th><th>Iscritti</th><th></th></tr></thead>
               <tbody>
                 ${state.data.courses
+                  .filter((course) => course.is_active !== false)
                   .map((course) => {
                     const count = state.data.enrollments.filter(
                       (item) =>
                         item.course_id === course.id &&
                         item.is_active !== false,
                     ).length;
-                    return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button></td></tr>`;
+                    return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
                   })
                   .join("")}
               </tbody>
@@ -3117,7 +3367,7 @@
     if (!student) {
       return `
         ${pageHeader("Area famiglia", "Benvenuti!", "Il profilo non ha ancora allievi associati.", "", true)}
-        <div class="card empty-state"><span class="empty-state__icon">${icon("users", 24)}</span><h3>Associazione in corso</h3><p>Contatta Valeria per completare il collegamento dell’allievo alla tua famiglia.</p></div>
+        <div class="card empty-state"><span class="empty-state__icon">${icon("users", 24)}</span><h3>Associazione in corso</h3><p>Contatta Valeria per completare il collegamento dell’allievo alla tua famiglia.</p>${supportActions(false)}</div>
       `;
     }
     const course = courseForStudent(student.id);
@@ -3247,6 +3497,12 @@
           ? `<div class="info-callout" style="margin-top:12px;color:var(--danger);background:var(--danger-bg)">${icon("alert", 18)}<p><strong>${futureCancelled.length === 1 ? "Una lezione futura è stata annullata." : `${futureCancelled.length} lezioni future sono state annullate.`}</strong> ${escapeHTML(futureCancelled[0].cancellation_reason || "Apri il calendario per vedere il dettaglio.")}</p></div>`
           : ""
       }
+      <section class="card" style="margin-top:18px">
+        <header class="card-header">
+          <div><h2>Serve una mano?</h2><p>Scrivi a Valeria, prenota un colloquio o lascia una notifica nel gestionale.</p></div>
+        </header>
+        ${supportActions(true)}
+      </section>
     `;
   }
 
@@ -3536,7 +3792,7 @@
         "Quote e scadenze",
         "Pagamenti",
         "Controlla il saldo e scegli come pagare in sicurezza.",
-        "",
+        `<button class="btn btn--secondary" type="button" data-action="open-family-notification">${icon("bell", 16)} Avvisa Valeria</button>`,
       )}
       <section class="grid grid--family">
         <article class="balance-card">
@@ -3551,7 +3807,7 @@
         <article class="card card--tinted-aqua">
           <header class="card-header"><div><h2>Pagamento sicuro</h2><p>PayPal oppure bonifico bancario</p></div></header>
           <div class="activity-list">
-            <div class="activity-item"><span class="activity-icon">${icon("card", 16)}</span><span class="activity-copy"><strong>PayPal</strong><span>Conferma automatica dopo il pagamento.</span></span></div>
+            <div class="activity-item"><span class="activity-icon">${icon("card", 16)}</span><span class="activity-copy"><strong>PayPal</strong><span>Paga dal profilo PayPal di Quarto MoVimento.</span></span><a class="btn btn--yellow btn--sm" href="${PAYPAL_ME_URL}" target="_blank" rel="noopener noreferrer">Apri PayPal</a></div>
             <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>Segnalalo dall’app; Valeria lo verificherà.</span></span></div>
           </div>
           <p class="subtle" style="margin:12px 0 0;font-size:10px">I dati PayPal sono gestiti da PayPal. L’app non memorizza dati di carta.</p>
@@ -3658,6 +3914,53 @@
       .join("");
   }
 
+  function openFamilyNotificationModal() {
+    const selectedStudent = getSelectedStudent();
+    const family = selectedStudent
+      ? familyForStudent(selectedStudent)
+      : state.data.families[0];
+    if (!family) {
+      toast(
+        "Notifica non disponibile",
+        "Il profilo non è ancora associato a una famiglia.",
+        "error",
+      );
+      return;
+    }
+    const familyStudents = state.data.students.filter(
+      (student) =>
+        student.family_id === family.id && student.is_active !== false,
+    );
+    openModal({
+      title: "Invia una notifica a Valeria",
+      subtitle: "Il messaggio comparirà subito nella dashboard amministrativa.",
+      className: "modal--sm",
+      body: `
+        <form id="family-notification-form">
+          <input type="hidden" name="family_id" value="${escapeHTML(family.id)}" />
+          <div class="form-grid">
+            <div class="field field--full"><label for="notification-student">Allievo</label><select class="select" id="notification-student" name="student_id"><option value="">Tutta la famiglia</option>${familyStudents
+              .map(
+                (student) =>
+                  `<option value="${escapeHTML(student.id)}"${student.id === selectedStudent?.id ? " selected" : ""}>${escapeHTML(fullName(student))}</option>`,
+              )
+              .join("")}</select></div>
+            <div class="field field--full"><label for="notification-kind">Argomento</label><select class="select" id="notification-kind" name="kind">${Object.entries(
+              LABELS.notificationKind,
+            )
+              .map(
+                ([key, label]) =>
+                  `<option value="${escapeHTML(key)}">${escapeHTML(label)}</option>`,
+              )
+              .join("")}</select></div>
+            <div class="field field--full"><label for="notification-message">Messaggio</label><textarea class="textarea" id="notification-message" name="message" rows="5" minlength="2" maxlength="2000" placeholder="Scrivi qui la comunicazione…" required></textarea><p class="field-hint">Per urgenze puoi usare anche il tasto “Parlane con Valeria” su WhatsApp.</p></div>
+          </div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="family-notification-form">${icon("bell", 15)} Invia notifica</button>`,
+    });
+  }
+
   function openStudentModal(studentId) {
     const student = studentId
       ? state.data.students.find((item) => item.id === studentId)
@@ -3681,7 +3984,9 @@
               <div class="field"><label for="student-first-name">Nome</label><input class="input" id="student-first-name" name="first_name" value="${escapeHTML(student?.first_name || "")}" required /></div>
               <div class="field"><label for="student-last-name">Cognome</label><input class="input" id="student-last-name" name="last_name" value="${escapeHTML(student?.last_name || "")}" required /></div>
               <div class="field"><label for="student-birth-date">Data di nascita</label><input class="input" id="student-birth-date" name="birth_date" type="date" value="${escapeHTML(student?.birth_date || "")}" /></div>
-              <div class="field"><label for="student-notes">Nota condivisa</label><input class="input" id="student-notes" name="notes" value="${escapeHTML(student?.notes || "")}" placeholder="Visibile anche alla famiglia" /></div>
+              <div class="field"><label for="student-fiscal-code">Codice fiscale</label><input class="input" id="student-fiscal-code" name="fiscal_code" value="${escapeHTML(student?.fiscal_code || "")}" maxlength="16" pattern="[A-Za-z0-9]{16}" autocomplete="off" placeholder="16 caratteri" /></div>
+              <div class="field field--full"><label for="student-residence-address">Indirizzo di residenza</label><input class="input" id="student-residence-address" name="residence_address" value="${escapeHTML(student?.residence_address || "")}" autocomplete="street-address" placeholder="Via, numero civico, CAP, città" /></div>
+              <div class="field field--full"><label for="student-notes">Nota condivisa</label><input class="input" id="student-notes" name="notes" value="${escapeHTML(student?.notes || "")}" placeholder="Visibile anche alla famiglia" /></div>
             </div>
           </div>
           <div class="setting-section">
@@ -3706,11 +4011,16 @@
             <p>Il piano determina scadenze e diritto ai recuperi.</p>
             <div class="form-grid form-grid--three">
               <div class="field field--full"><label for="student-course">Corso</label><select class="select" id="student-course" name="course_id" required><option value="">Scegli il corso</option>${courseOptions(enrollment?.course_id || "")}</select></div>
-              <div class="field"><label for="student-plan">Piano</label><select class="select" id="student-plan" name="plan_type">${Object.entries(LABELS.plan)
+              <div class="field"><label for="student-plan">Piano</label><select class="select" id="student-plan" name="plan_type">${enrollment?.plan_type && !["trial", "trial_package_2", "monthly", "quarterly", "annual", "workshop"].includes(enrollment.plan_type) ? `<option value="${escapeHTML(enrollment.plan_type)}" selected>${escapeHTML(LABELS.plan[enrollment.plan_type] || enrollment.plan_type)} · piano precedente</option>` : ""}${Object.entries(LABELS.plan)
                 .filter(([key]) =>
-                  ["monthly", "semester", "annual", "trial", "workshop"].includes(
-                    key,
-                  ),
+                  [
+                    "trial",
+                    "trial_package_2",
+                    "monthly",
+                    "quarterly",
+                    "annual",
+                    "workshop",
+                  ].includes(key),
                 )
                 .map(
                   ([key, label]) =>
@@ -3719,12 +4029,15 @@
                 .join("")}</select></div>
               <div class="field"><label for="student-starts">Inizio</label><input class="input" id="student-starts" name="starts_on" type="date" value="${escapeHTML(enrollment?.starts_on || todayKey())}" required /></div>
               <div class="field"><label for="student-ends">Fine</label><input class="input" id="student-ends" name="ends_on" type="date" value="${escapeHTML(enrollment?.ends_on || defaultEnd)}" /></div>
+              <div class="field field--full"><label for="student-enrollment-notes">Note del piano</label><textarea class="textarea" id="student-enrollment-notes" name="enrollment_notes" rows="3" placeholder="Es. accordi sul pagamento o indicazioni sulla frequenza">${escapeHTML(enrollment?.notes || "")}</textarea><p class="field-hint">Annotazioni relative al piano, ai pagamenti o alla frequenza.</p></div>
             </div>
           </div>
         </form>
       `,
       footer: `
+        ${student ? `<button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina allievo</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button>
+        ${student && family?.email && !family.email.endsWith("@invalid.local") ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(family.email)}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Invia/reinvia accesso</button>` : ""}
         <button class="btn btn--primary" type="submit" form="student-form">${student ? "Salva modifiche" : "Aggiungi e invita"}</button>
       `,
     });
@@ -3751,6 +4064,13 @@
           ${statCard("Saldo", formatMoney(studentBalance(student.id)), `${invoices.length} movimenti`, "wallet")}
         </div>
         <div class="setting-section">
+          <h3>Dati anagrafici</h3>
+          <div class="activity-list">
+            <div class="activity-item"><span class="activity-icon">${icon("info", 16)}</span><span class="activity-copy"><strong>${escapeHTML(student.fiscal_code || "—")}</strong><span>Codice fiscale</span></span></div>
+            <div class="activity-item"><span class="activity-icon">${icon("map", 16)}</span><span class="activity-copy"><strong>${escapeHTML(student.residence_address || "—")}</strong><span>Indirizzo di residenza</span></span></div>
+          </div>
+        </div>
+        <div class="setting-section">
           <h3>Contatti famiglia</h3>
           <p>${escapeHTML(family?.display_name || "")}</p>
           <div class="activity-list">
@@ -3760,9 +4080,12 @@
           </div>
         </div>
         ${student.notes ? `<div class="setting-section"><h3>Nota condivisa</h3><p class="muted">${escapeHTML(student.notes)}</p></div>` : ""}
+        ${enrollment?.notes ? `<div class="setting-section"><h3>Note del piano</h3><p class="muted">${escapeHTML(enrollment.notes)}</p></div>` : ""}
       `,
       footer: `
+        <button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina</button>
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
+        ${family?.email && !family.email.endsWith("@invalid.local") ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(family.email)}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Invia/reinvia accesso</button>` : ""}
         <button class="btn btn--primary" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}">${icon("edit", 15)} Modifica</button>
       `,
     });
@@ -3998,7 +4321,7 @@
           </div>
         </form>
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="course-form">${course ? "Salva" : "Aggiungi corso"}</button>`,
+      footer: `${course ? `<button class="btn btn--danger" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}">${icon("trash", 15)} Elimina corso</button>` : ""}<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="course-form">${course ? "Salva" : "Aggiungi corso"}</button>`,
     });
   }
 
@@ -4215,13 +4538,14 @@
         <div class="grid grid--two">
           <section>
             <h3 style="font-size:15px;margin-bottom:5px">Paga con PayPal</h3>
-            <p class="muted" style="font-size:11px;margin-bottom:15px">Conferma immediata e sicura. Non memorizziamo i dati della carta.</p>
+            <p class="muted" style="font-size:11px;margin-bottom:15px">Apri il profilo ufficiale Quarto MoVimento e indica l’importo qui mostrato. Non memorizziamo i dati della carta.</p>
+            <a class="btn btn--yellow" style="width:100%;margin-bottom:12px" href="${PAYPAL_ME_URL}" target="_blank" rel="noopener noreferrer">${icon("card", 16)} Paga con PayPal</a>
             ${
               state.mode === "demo"
-                ? `<button class="btn btn--yellow" style="width:100%" type="button" data-action="simulate-paypal" data-invoice-id="${escapeHTML(invoice.id)}">${icon("card", 16)} Simula pagamento PayPal</button><p class="subtle" style="font-size:10px;margin-top:9px">In anteprima non viene eseguito alcun addebito.</p>`
+                ? `<button class="btn btn--secondary" style="width:100%" type="button" data-action="simulate-paypal" data-invoice-id="${escapeHTML(invoice.id)}">Simula conferma automatica</button><p class="subtle" style="font-size:10px;margin-top:9px">In anteprima non viene eseguito alcun addebito.</p>`
                 : config.paypalClientId
                   ? `<div id="paypal-button-container"></div>`
-                  : `<div class="info-callout">${icon("info", 17)}<p>PayPal non è ancora configurato. Puoi procedere con bonifico.</p></div>`
+                  : `<div class="info-callout">${icon("info", 17)}<p>Dopo il pagamento, Valeria aggiornerà lo stato della quota. Per comunicarlo subito puoi inviare una notifica dalla Home.</p></div>`
             }
           </section>
           <section>
@@ -4315,6 +4639,42 @@
       state.selectedStudentId = state.data.students[0]?.id || null;
     }
     if (render !== false) renderShell();
+  }
+
+  async function clearNotificationSubscription() {
+    if (state.notificationsChannel && state.supabase) {
+      await state.supabase.removeChannel(state.notificationsChannel);
+    }
+    state.notificationsChannel = null;
+  }
+
+  async function setupNotificationSubscription() {
+    await clearNotificationSubscription();
+    if (state.mode !== "production" || !state.supabase || !state.user) return;
+    state.notificationsChannel = state.supabase
+      .channel(`family-notifications-${state.user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "family_notifications",
+        },
+        async (payload) => {
+          try {
+            await refreshData();
+            if (state.role === ROLE_ADMIN && payload.eventType === "INSERT") {
+              toast(
+                "Nuova notifica da una famiglia",
+                "Apri il riepilogo per leggere il messaggio.",
+              );
+            }
+          } catch (error) {
+            console.warn("Aggiornamento notifiche non riuscito:", error);
+          }
+        },
+      )
+      .subscribe();
   }
 
   let attendanceEffectsTimer = null;
@@ -4501,8 +4861,9 @@
             <span class="empty-state__icon">${icon("mail", 24)}</span>
             <h1 style="font-size:24px">${inactive ? "Account disattivato" : "Accesso da completare"}</h1>
             <p>${inactive ? "Questo profilo non è attivo. Contatta Quarto MoVimento se pensi si tratti di un errore." : "Il tuo account è autenticato, ma non è ancora associato a una famiglia o al ruolo amministratore. Contatta Quarto MoVimento."}</p>
-            <div style="display:flex;gap:9px;justify-content:center">
-              <a class="btn btn--primary" href="mailto:${escapeHTML(supportEmail())}">Scrivi a Valeria</a>
+            <div class="support-actions" style="justify-content:center">
+              <a class="btn btn--primary" href="${WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">Parlane con Valeria</a>
+              <a class="btn btn--secondary" href="${TIDYCAL_URL}" target="_blank" rel="noopener noreferrer">Fissa un colloquio</a>
               <button class="btn btn--secondary" type="button" data-action="logout">Esci</button>
             </div>
           </div>
@@ -4548,6 +4909,7 @@
         return;
       }
       await refreshData(false);
+      await setupNotificationSubscription();
       state.selectedStudentId =
         state.role === ROLE_FAMILY
           ? state.selectedStudentId || state.data.students[0]?.id || null
@@ -4579,6 +4941,7 @@
 
   async function logout() {
     closeModal();
+    await clearNotificationSubscription();
     if (state.mode === "production" && state.supabase) {
       await state.supabase.auth.signOut();
     }
@@ -4675,6 +5038,128 @@
     }
   }
 
+  function openManualInvitationLink(link, email) {
+    openModal({
+      title: "Invito pronto da condividere",
+      subtitle: "L’e-mail automatica non è disponibile, ma l’accesso è stato preparato.",
+      className: "modal--sm",
+      body: `
+        <div class="info-callout">${icon("info", 18)}<p>Invia questo link personale a <strong>${escapeHTML(email)}</strong>. Il link è temporaneo e consente di impostare la password.</p></div>
+        <div class="field" style="margin-top:16px"><label for="manual-invite-link">Link di attivazione</label><input class="input" id="manual-invite-link" value="${escapeHTML(link)}" readonly /></div>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--primary" type="button" data-action="copy-value" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia link</button>`,
+    });
+  }
+
+  async function handleInviteFamilyAction(actionTarget) {
+    setButtonLoading(actionTarget, true, "Invio…");
+    try {
+      const result = await state.store.inviteFamily({
+        familyId: actionTarget.dataset.familyId,
+        email: actionTarget.dataset.email,
+        guardianName: actionTarget.dataset.guardianName,
+      });
+      const manualInviteUrl =
+        result?.manual_invite_url || result?.activation_link || null;
+      if (manualInviteUrl && !result?.invitation_sent) {
+        openManualInvitationLink(manualInviteUrl, actionTarget.dataset.email);
+      } else {
+        closeModal();
+        toast(
+          result?.linked_existing_user ? "Accesso collegato" : "Invito inviato",
+          result?.linked_existing_user
+            ? "La famiglia aveva già un account: ora è collegato all’allievo."
+            : `L’e-mail di accesso è stata inviata a ${actionTarget.dataset.email}.`,
+        );
+      }
+    } catch (error) {
+      if (error?.activationLink) {
+        openManualInvitationLink(error.activationLink, actionTarget.dataset.email);
+      } else {
+        setButtonLoading(actionTarget, false);
+        toast(
+          "Invito non inviato",
+          error.message || "Controlla la configurazione e riprova.",
+          "error",
+        );
+      }
+    }
+  }
+
+  async function handleDeleteStudentAction(actionTarget) {
+    const student = state.data.students.find(
+      (item) => item.id === actionTarget.dataset.studentId,
+    );
+    if (!student) return;
+    if (
+      !window.confirm(
+        `Eliminare ${fullName(student)} dagli allievi attivi? Presenze e pagamenti storici verranno conservati.`,
+      )
+    ) {
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Eliminazione…");
+    try {
+      await state.store.archiveStudent(student.id);
+      closeModal();
+      await refreshData();
+      toast(
+        "Allievo eliminato",
+        "È stato rimosso dall’anagrafica attiva; lo storico resta conservato.",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast("Allievo non eliminato", error.message, "error");
+    }
+  }
+
+  async function handleDeleteCourseAction(actionTarget) {
+    const course = state.data.courses.find(
+      (item) => item.id === actionTarget.dataset.courseId,
+    );
+    if (!course) return;
+    if (
+      !window.confirm(
+        `Eliminare il corso “${course.name}”? Le iscrizioni verranno chiuse e le lezioni future ancora programmate saranno annullate. Lo storico resterà conservato.`,
+      )
+    ) {
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Eliminazione…");
+    try {
+      await state.store.archiveCourse(course.id);
+      closeModal();
+      await refreshData();
+      toast(
+        "Corso eliminato",
+        "Il corso non è più attivo e lo storico è stato conservato.",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast("Corso non eliminato", error.message, "error");
+    }
+  }
+
+  async function handleFamilyNotificationStatus(actionTarget) {
+    setButtonLoading(actionTarget, true, "Salvataggio…");
+    try {
+      await state.store.updateFamilyNotification(
+        actionTarget.dataset.notificationId,
+        actionTarget.dataset.status,
+      );
+      await refreshData();
+      toast(
+        actionTarget.dataset.status === "resolved"
+          ? "Notifica risolta"
+          : "Notifica letta",
+        "Lo stato è stato aggiornato.",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast("Notifica non aggiornata", error.message, "error");
+    }
+  }
+
   appRoot.addEventListener("click", async (event) => {
     const actionTarget = event.target.closest("[data-action]");
     if (!actionTarget) return;
@@ -4705,10 +5190,16 @@
       renderShell();
     } else if (action === "open-student-modal") {
       openStudentModal();
+    } else if (action === "open-family-notification") {
+      openFamilyNotificationModal();
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "view-student") {
       openStudentDetails(actionTarget.dataset.studentId);
+    } else if (action === "delete-student") {
+      await handleDeleteStudentAction(actionTarget);
+    } else if (action === "invite-family") {
+      await handleInviteFamilyAction(actionTarget);
     } else if (action === "open-lesson-modal") {
       openLessonModal(actionTarget.dataset.date, {
         courseId: actionTarget.dataset.courseId,
@@ -4726,6 +5217,8 @@
       openCourseModal();
     } else if (action === "edit-course") {
       openCourseModal(actionTarget.dataset.courseId);
+    } else if (action === "delete-course") {
+      await handleDeleteCourseAction(actionTarget);
     } else if (action === "open-invoice-modal") {
       openInvoiceModal();
     } else if (action === "view-invoice") {
@@ -4753,6 +5246,8 @@
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
     } else if (action === "pay-invoice") {
       openPaymentModal(actionTarget.dataset.invoiceId);
+    } else if (action === "update-family-notification") {
+      await handleFamilyNotificationStatus(actionTarget);
     } else if (action === "close-modal") {
       closeModal();
     } else if (action === "select-attendance-date") {
@@ -4912,8 +5407,18 @@
     const action = actionTarget.dataset.action;
     if (action === "close-modal") {
       closeModal();
+    } else if (action === "open-family-notification") {
+      openFamilyNotificationModal();
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
+    } else if (action === "delete-student") {
+      await handleDeleteStudentAction(actionTarget);
+    } else if (action === "invite-family") {
+      await handleInviteFamilyAction(actionTarget);
+    } else if (action === "delete-course") {
+      await handleDeleteCourseAction(actionTarget);
+    } else if (action === "update-family-notification") {
+      await handleFamilyNotificationStatus(actionTarget);
     } else if (action === "edit-lesson") {
       openEditLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "mark-invoice-paid") {
@@ -5060,11 +5565,22 @@
             "Per una nuova famiglia inserisci nome del tutore ed e-mail.",
           );
         }
+        values.fiscal_code = String(values.fiscal_code || "")
+          .trim()
+          .toUpperCase();
+        if (
+          values.fiscal_code &&
+          !/^[A-Z0-9]{16}$/.test(values.fiscal_code)
+        ) {
+          throw new Error("Il codice fiscale deve contenere 16 caratteri.");
+        }
         const result = await state.store.saveStudent(values);
         closeModal();
         await refreshData();
         if (values.id) {
           toast("Allievo aggiornato", "Le modifiche sono state salvate.");
+        } else if (result.activationLink) {
+          openManualInvitationLink(result.activationLink, values.email);
         } else if (result.inviteError) {
           toast(
             "Allievo aggiunto, invito non inviato",
@@ -5084,6 +5600,23 @@
         } else {
           toast("Allievo aggiunto", "I dati sono stati salvati.");
         }
+      } else if (formId === "family-notification-form") {
+        const notificationMessage = String(values.message || "").trim();
+        if (notificationMessage.length < 2) {
+          throw new Error("Scrivi un messaggio prima di inviare la notifica.");
+        }
+        await state.store.submitFamilyNotification({
+          family_id: values.family_id,
+          student_id: values.student_id || null,
+          kind: values.kind,
+          message: notificationMessage,
+        });
+        closeModal();
+        await refreshData();
+        toast(
+          "Notifica inviata",
+          "Valeria la vedrà nella sua dashboard amministrativa.",
+        );
       } else if (formId === "lesson-form") {
         const start = romeDateTime(values.date, values.time);
         if (Number.isNaN(start.getTime())) {
@@ -5394,6 +5927,7 @@
         (event, authSession) => {
           window.setTimeout(async () => {
             if (event === "SIGNED_OUT") {
+              await clearNotificationSubscription();
               state.authFingerprint = null;
               state.user = null;
               state.profile = null;
