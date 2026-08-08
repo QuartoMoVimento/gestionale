@@ -211,7 +211,7 @@ jobs:
 
           if (!paypalClientId) {
             console.log(
-              "::notice::PAYPAL_CLIENT_ID non impostato: il pagamento PayPal resterà disabilitato.",
+              "::notice::PAYPAL_CLIENT_ID non impostato: PayPal Checkout resterà disabilitato; il link PayPal.Me rimane disponibile.",
             );
           }
 

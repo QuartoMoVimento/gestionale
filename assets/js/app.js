@@ -57,6 +57,7 @@
       paymentStatus: "all",
     },
     settingsTab: "school",
+    notificationLimit: 8,
     authListener: null,
     notificationsChannel: null,
     authFingerprint: null,
@@ -2258,7 +2259,7 @@
         ${
           notifications.length
             ? `<div class="notification-list">${notifications
-                .slice(0, 8)
+                .slice(0, state.notificationLimit)
                 .map((notification) => {
                   const family = state.data.families.find(
                     (item) => item.id === notification.family_id,
@@ -2282,7 +2283,13 @@
                     </article>
                   `;
                 })
-                .join("")}</div>`
+                .join("")}</div>${
+                  notifications.length > state.notificationLimit
+                    ? `<div class="notification-list__more"><button class="btn btn--secondary btn--sm" type="button" data-action="show-more-notifications">Mostra altre notifiche (${notifications.length - state.notificationLimit})</button></div>`
+                    : notifications.length > 8 && state.notificationLimit > 8
+                      ? `<div class="notification-list__more"><button class="btn btn--ghost btn--sm" type="button" data-action="collapse-notifications">Mostra meno</button></div>`
+                      : ""
+                }`
             : `<div class="empty-state"><span class="empty-state__icon">${icon("bell", 22)}</span><h3>Nessuna notifica</h3><p>Quando una famiglia invia un messaggio, lo vedrai qui.</p></div>`
         }
       </section>
@@ -5248,6 +5255,12 @@
       openPaymentModal(actionTarget.dataset.invoiceId);
     } else if (action === "update-family-notification") {
       await handleFamilyNotificationStatus(actionTarget);
+    } else if (action === "show-more-notifications") {
+      state.notificationLimit += 8;
+      renderShell();
+    } else if (action === "collapse-notifications") {
+      state.notificationLimit = 8;
+      renderShell();
     } else if (action === "close-modal") {
       closeModal();
     } else if (action === "select-attendance-date") {

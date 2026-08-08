@@ -2323,6 +2323,12 @@ h4 {
   gap: 8px;
 }
 
+.notification-list__more {
+  display: flex;
+  margin-top: 12px;
+  justify-content: center;
+}
+
 .notification-item {
   display: flex;
   min-width: 0;
