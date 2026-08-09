@@ -20,6 +20,9 @@
   const PAYPAL_ME_URL =
     "https://paypal.me/quartomov?locale.x=it_IT&country.x=IT";
   const BANK_REFERENCE_TEMPLATE = "{nome}, {cognome}, {numero}";
+  const AUTH_EMAIL_COOLDOWN_KEY = "qm_auth_email_cooldown_until";
+  const AUTH_EMAIL_COOLDOWN_MS = 60 * 1000;
+  const AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
   const ADMIN_ROUTES = [
     "overview",
     "attendance",
@@ -2186,8 +2189,9 @@
               </div>
               <div class="login-actions">
                 <button class="btn btn--primary btn--lg" type="submit">Accedi ${icon("arrowRight", 17)}</button>
-                <button class="btn btn--ghost" type="button" data-action="magic-link">Ricevi un link via e-mail</button>
+                <button class="btn btn--ghost" id="magic-link-button" type="button" data-action="magic-link">Ricevi un link via e-mail</button>
               </div>
+              <p class="field-hint" id="auth-email-status">Dopo l’invio attendi 60 secondi prima di richiedere un nuovo link.</p>
             </form>
             <p class="login-helper">
               Il profilo riconosce automaticamente se sei amministratrice o famiglia.
@@ -2242,6 +2246,7 @@
         </aside>
       </main>
     `;
+    window.setTimeout(syncAuthEmailCooldown, 0);
   }
 
   function routeInfo() {
@@ -5021,6 +5026,140 @@
     );
   }
 
+  let authEmailCooldownTimer = null;
+  let authEmailCooldownMemoryUntil = 0;
+
+  function authEmailCooldownUntil() {
+    let storedUntil = 0;
+    try {
+      const value = Number(
+        window.localStorage.getItem(AUTH_EMAIL_COOLDOWN_KEY) || 0,
+      );
+      storedUntil = Number.isFinite(value) ? value : 0;
+    } catch {
+      storedUntil = 0;
+    }
+    return Math.max(storedUntil, authEmailCooldownMemoryUntil);
+  }
+
+  function authEmailCooldownSeconds() {
+    return Math.max(
+      0,
+      Math.ceil((authEmailCooldownUntil() - Date.now()) / 1000),
+    );
+  }
+
+  function setAuthEmailCooldown(duration) {
+    const until = Date.now() + Math.max(1000, Number(duration) || 0);
+    authEmailCooldownMemoryUntil = until;
+    try {
+      window.localStorage.setItem(AUTH_EMAIL_COOLDOWN_KEY, String(until));
+    } catch {
+      // Il blocco resta comunque attivo nella pagina corrente tramite il timer.
+    }
+    syncAuthEmailCooldown(until);
+    return until;
+  }
+
+  function clearAuthEmailCooldown(expectedUntil) {
+    if (
+      !expectedUntil ||
+      authEmailCooldownMemoryUntil === Number(expectedUntil)
+    ) {
+      authEmailCooldownMemoryUntil = 0;
+    }
+    try {
+      const storedUntil = Number(
+        window.localStorage.getItem(AUTH_EMAIL_COOLDOWN_KEY) || 0,
+      );
+      if (!expectedUntil || storedUntil === Number(expectedUntil)) {
+        window.localStorage.removeItem(AUTH_EMAIL_COOLDOWN_KEY);
+      }
+    } catch {
+      // Nessuna azione necessaria se lo storage non è disponibile.
+    }
+    syncAuthEmailCooldown(0);
+  }
+
+  function syncAuthEmailCooldown(forcedUntil) {
+    window.clearTimeout(authEmailCooldownTimer);
+    const until = Math.max(
+      Number(forcedUntil) || 0,
+      authEmailCooldownUntil(),
+    );
+    const seconds = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    const magicLinkButton = document.getElementById("magic-link-button");
+    const resetButton = document.querySelector(
+      '[data-action="forgot-password"]',
+    );
+    const status = document.getElementById("auth-email-status");
+
+    if (seconds > 0) {
+      if (magicLinkButton && !magicLinkButton.dataset.originalHtml) {
+        magicLinkButton.disabled = true;
+        magicLinkButton.textContent = `Link già richiesto · ${seconds}s`;
+      }
+      if (resetButton && !resetButton.dataset.originalHtml) {
+        resetButton.disabled = true;
+        resetButton.textContent = `Nuovo invio tra ${seconds}s`;
+      }
+      if (status) {
+        status.textContent =
+          `Usa l’ultima e-mail ricevuta. Un nuovo invio sarà disponibile tra ${seconds} secondi.`;
+      }
+      authEmailCooldownTimer = window.setTimeout(
+        () => syncAuthEmailCooldown(until),
+        1000,
+      );
+      return;
+    }
+
+    authEmailCooldownMemoryUntil = 0;
+    try {
+      window.localStorage.removeItem(AUTH_EMAIL_COOLDOWN_KEY);
+    } catch {
+      // Nessuna azione necessaria se lo storage non è disponibile.
+    }
+    if (magicLinkButton && !magicLinkButton.dataset.originalHtml) {
+      magicLinkButton.disabled = false;
+      magicLinkButton.textContent = "Ricevi un link via e-mail";
+    }
+    if (resetButton && !resetButton.dataset.originalHtml) {
+      resetButton.disabled = false;
+      resetButton.textContent = "Password dimenticata?";
+    }
+    if (status) {
+      status.textContent =
+        "Dopo l’invio attendi 60 secondi prima di richiedere un nuovo link.";
+    }
+  }
+
+  function isAuthRateLimitError(error) {
+    const code = String(error?.code || "").toLowerCase();
+    const message = String(error?.message || "");
+    return (
+      Number(error?.status || 0) === 429 ||
+      [
+        "over_email_send_rate_limit",
+        "over_request_rate_limit",
+        "email_rate_limit_exceeded",
+      ].includes(code) ||
+      /(?:(?:email|request)\s+)?rate limit (?:exceeded|reached)|too many (?:emails?|requests?)/i.test(
+        message,
+      )
+    );
+  }
+
+  function showAuthEmailCooldownMessage() {
+    const seconds = authEmailCooldownSeconds();
+    toast(
+      "Link già richiesto",
+      seconds > 0
+        ? `Usa l’ultima e-mail ricevuta oppure accedi con la password. Potrai fare un nuovo invio tra ${seconds} secondi.`
+        : "Usa l’ultima e-mail ricevuta oppure accedi con la password.",
+    );
+  }
+
   async function sendMagicLink() {
     if (state.mode !== "production") {
       toast(
@@ -5031,14 +5170,20 @@
       return;
     }
     const emailInput = document.getElementById("login-email");
-    const email = emailInput?.value.trim();
+    const email = emailInput?.value.trim().toLowerCase();
     if (!email) {
       emailInput?.focus();
       toast("Inserisci l’e-mail", "Serve per inviarti il link di accesso.", "error");
       return;
     }
     const button = document.querySelector('[data-action="magic-link"]');
+    if (authEmailCooldownSeconds() > 0) {
+      syncAuthEmailCooldown();
+      showAuthEmailCooldownMessage();
+      return;
+    }
     setButtonLoading(button, true, "Invio…");
+    const requestCooldownUntil = setAuthEmailCooldown(AUTH_EMAIL_COOLDOWN_MS);
     try {
       const { error } = await state.supabase.auth.signInWithOtp({
         email,
@@ -5050,16 +5195,26 @@
       if (error) throw error;
       toast(
         "Controlla la posta",
-        "Ti abbiamo inviato un link di accesso. Controlla anche lo spam.",
+        "Ti abbiamo inviato un link di accesso. Usa l’ultima e-mail ricevuta e controlla anche lo spam.",
       );
     } catch (error) {
-      toast(
-        "Link non inviato",
-        error.message || "Controlla l’indirizzo e riprova.",
-        "error",
-      );
+      if (isAuthRateLimitError(error)) {
+        setAuthEmailCooldown(AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS);
+        toast(
+          "Link già richiesto di recente",
+          "Il servizio e-mail ha raggiunto temporaneamente il limite di invio. Usa l’ultimo link ricevuto oppure accedi con la password; il gestionale non ripeterà automaticamente la richiesta.",
+        );
+      } else {
+        clearAuthEmailCooldown(requestCooldownUntil);
+        toast(
+          "Link non inviato",
+          error.message || "Controlla l’indirizzo e riprova.",
+          "error",
+        );
+      }
     } finally {
       setButtonLoading(button, false);
+      syncAuthEmailCooldown();
     }
   }
 
@@ -5073,7 +5228,7 @@
       return;
     }
     const emailInput = document.getElementById("login-email");
-    const email = emailInput?.value.trim();
+    const email = emailInput?.value.trim().toLowerCase();
     if (!email) {
       emailInput?.focus();
       toast(
@@ -5083,6 +5238,14 @@
       );
       return;
     }
+    const button = document.querySelector('[data-action="forgot-password"]');
+    if (authEmailCooldownSeconds() > 0) {
+      syncAuthEmailCooldown();
+      showAuthEmailCooldownMessage();
+      return;
+    }
+    setButtonLoading(button, true, "Invio…");
+    const requestCooldownUntil = setAuthEmailCooldown(AUTH_EMAIL_COOLDOWN_MS);
     try {
       const { error } = await state.supabase.auth.resetPasswordForEmail(email, {
         redirectTo: authRedirectUrl("set-password"),
@@ -5093,11 +5256,23 @@
         "Apri il link ricevuto per scegliere una nuova password.",
       );
     } catch (error) {
-      toast(
-        "Recupero non avviato",
-        error.message || "Riprova tra poco.",
-        "error",
-      );
+      if (isAuthRateLimitError(error)) {
+        setAuthEmailCooldown(AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS);
+        toast(
+          "Recupero già richiesto",
+          "Il servizio e-mail ha raggiunto temporaneamente il limite di invio. Usa l’ultima e-mail ricevuta oppure accedi con la password.",
+        );
+      } else {
+        clearAuthEmailCooldown(requestCooldownUntil);
+        toast(
+          "Recupero non avviato",
+          error.message || "Riprova tra poco.",
+          "error",
+        );
+      }
+    } finally {
+      setButtonLoading(button, false);
+      syncAuthEmailCooldown();
     }
   }
 
@@ -5114,11 +5289,14 @@
       if (!data.session) throw new Error("Accesso non completato.");
       await loadAuthenticatedUser(data.user);
     } catch (error) {
+      const rateLimited = isAuthRateLimitError(error);
       toast(
-        "Accesso non riuscito",
-        /invalid login credentials/i.test(error.message || "")
-          ? "E-mail o password non corrette."
-          : error.message || "Riprova tra poco.",
+        rateLimited ? "Troppi tentativi di accesso" : "Accesso non riuscito",
+        rateLimited
+          ? "Attendi qualche minuto prima di riprovare."
+          : /invalid login credentials/i.test(error.message || "")
+            ? "E-mail o password non corrette."
+            : error.message || "Riprova tra poco.",
         "error",
       );
     } finally {
@@ -6237,6 +6415,10 @@
       return;
     }
     renderShell();
+  });
+
+  window.addEventListener("storage", (event) => {
+    if (event.key === AUTH_EMAIL_COOLDOWN_KEY) syncAuthEmailCooldown();
   });
 
   let visibilityRefreshInFlight = false;

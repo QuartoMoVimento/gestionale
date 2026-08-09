@@ -2502,6 +2502,11 @@ h4 {
   cursor: pointer;
 }
 
+.copy-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .makeup-item {
   display: grid;
   padding: 15px 0;
