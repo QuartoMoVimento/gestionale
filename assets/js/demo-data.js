@@ -65,6 +65,7 @@
           email: "giulia.bianchi@example.com",
           display_name: "Giulia Bianchi",
           is_active: true,
+          auth_confirmed: true,
         },
       },
       {
@@ -76,6 +77,7 @@
           email: "andrea.bianchi@example.com",
           display_name: "Andrea Bianchi",
           is_active: true,
+          auth_confirmed: true,
         },
       },
       ...families.slice(1).map((family, index) => ({
@@ -87,9 +89,16 @@
           email: family.email,
           display_name: family.guardian_name,
           is_active: true,
+          auth_confirmed: true,
         },
       })),
     ];
+
+    const familyAccessEmails = families.map((family) => ({
+      family_id: family.id,
+      email: family.email,
+      is_primary: true,
+    }));
 
     const students = [
       {
@@ -482,6 +491,7 @@
     return {
       families,
       familyUsers,
+      familyAccessEmails,
       students,
       courses,
       enrollments,

@@ -2,7 +2,6 @@ import {
   errorResponse,
   handlePreflight,
   jsonResponse,
-  publicError,
   readJson,
   requirePost,
 } from "../_shared/http.ts";
@@ -16,20 +15,50 @@ import type {
   User,
 } from "npm:@supabase/supabase-js@2.49.8";
 
+type InviteAction = "status" | "generate_link";
+type AccountStatus =
+  | "missing"
+  | "pending"
+  | "active"
+  | "disabled"
+  | "role_invalid";
+
 interface InviteRequest {
-  family_id: string;
-  email: string;
-  display_name?: string;
-  guardian_name?: string;
-  phone?: string;
-  relationship?: string;
-  is_primary?: boolean;
-  redirect_to?: string;
+  action?: unknown;
+  family_id?: unknown;
+  target_emails?: unknown;
+  target_email?: unknown;
+  redirect_to?: unknown;
 }
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+interface FamilyRecord {
+  id: string;
+  display_name: string;
+  guardian_name: string;
+  email: string;
+  is_active: boolean;
+}
+
+interface ProfileRecord {
+  id: string;
+  email: string | null;
+  is_active: boolean;
+  role: string;
+}
+
+interface AccountResolution {
+  email: string;
+  profile: ProfileRecord | null;
+  user: User | null;
+}
+
+interface PublicAccountStatus {
+  email: string;
+  account_status: AccountStatus;
+  account_active: boolean;
+  code?: string;
+  message?: string;
+}
 
 interface AuthErrorDetails {
   code: string;
@@ -37,21 +66,46 @@ interface AuthErrorDetails {
   status: number;
 }
 
-interface PublicInviteFailure {
+interface PublicAuthFailure {
   code: string;
   message: string;
   status: number;
   retryable: boolean;
-  action_required?: string;
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_STATUS_EMAILS = 50;
+
+class PublicOperationError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(
+    code: string,
+    message: string,
+    status = 400,
+    retryable = false,
+  ) {
+    super(message);
+    this.name = "PublicOperationError";
+    this.code = code;
+    this.status = status;
+    this.retryable = retryable;
+  }
 }
 
 class AuthOperationError extends Error {
   readonly providerError: unknown;
+  readonly operation: InviteAction;
 
-  constructor(error: unknown) {
+  constructor(error: unknown, operation: InviteAction) {
     super("auth_operation_failed");
     this.name = "AuthOperationError";
     this.providerError = error;
+    this.operation = operation;
   }
 }
 
@@ -73,159 +127,172 @@ function isEmailConflict(error: unknown): boolean {
       .test(message);
 }
 
-function isEmailDeliveryFailure(error: unknown): boolean {
+function isUserNotFound(error: unknown): boolean {
   const { code, message, status } = authErrorDetails(error);
-  return status === 429 ||
-    [
-      "email_address_not_authorized",
-      "email_provider_disabled",
-      "over_email_send_rate_limit",
-      "over_request_rate_limit",
-    ].includes(code) ||
-    /email address not authorized|rate limit|smtp|mailer|send(?:ing)? (?:the )?(?:invite )?email/i
-      .test(message);
+  return code === "user_not_found" ||
+    status === 404 ||
+    /user.*not found/i.test(message);
 }
 
-function publicInviteFailure(error: unknown): PublicInviteFailure {
+function publicAuthFailure(
+  error: unknown,
+  operation: InviteAction,
+): PublicAuthFailure {
   const { code, message, status } = authErrorDetails(error);
-  if (
-    code === "email_address_not_authorized" ||
-    /email address not authorized/i.test(message)
-  ) {
-    return {
-      code: "email_provider_not_configured",
-      message:
-        "L'invio e-mail non è ancora configurato. Configura un provider SMTP in Supabase Auth e riprova.",
-      status: 503,
-      retryable: false,
-      action_required: "configure_smtp",
-    };
-  }
-  if (
-    status === 429 ||
-    ["over_email_send_rate_limit", "over_request_rate_limit"].includes(code) ||
-    /rate limit/i.test(message)
-  ) {
-    return {
-      code: "email_rate_limit",
-      message:
-        "Sono stati inviati troppi inviti in poco tempo. Attendi qualche minuto e riprova.",
-      status: 429,
-      retryable: true,
-    };
-  }
+
   if (
     code === "email_address_invalid" ||
     /invalid email|email address.*invalid/i.test(message)
   ) {
     return {
       code: "invalid_email",
-      message: "L'indirizzo e-mail non è accettato dal servizio di invio.",
+      message: "L'indirizzo e-mail non è accettato da Supabase.",
       status: 400,
       retryable: false,
     };
   }
+
   if (isEmailConflict(error)) {
     return {
       code: "auth_user_conflict",
       message:
-        "Esiste già un account con questa e-mail, ma non è stato possibile collegarlo automaticamente.",
+        "Esiste già un account con questa e-mail, ma non è stato possibile verificarlo o collegarlo.",
       status: 409,
       retryable: false,
     };
   }
-  if (isEmailDeliveryFailure(error)) {
+
+  if (
+    status === 429 ||
+    ["over_request_rate_limit", "rate_limit_exceeded"].includes(code) ||
+    /rate limit/i.test(message)
+  ) {
     return {
-      code: "email_delivery_failed",
+      code: operation === "status"
+        ? "account_status_rate_limited"
+        : "link_generation_rate_limited",
       message:
-        "Il servizio e-mail non ha accettato l'invito. Verifica la configurazione SMTP e riprova.",
-      status: 502,
+        "Supabase ha limitato temporaneamente le richieste. Attendi qualche minuto e riprova.",
+      status: 429,
       retryable: true,
-      action_required: "check_smtp",
     };
   }
-  return {
-    code: "invite_failed",
-    message: "Impossibile creare o inviare l'invito.",
-    status: status >= 400 && status < 500 ? status : 500,
-    retryable: status === 0 || status >= 500,
-  };
-}
 
-async function findAuthUserByEmail(
-  admin: SupabaseClient,
-  email: string,
-): Promise<User | null> {
-  // L'Admin API non espone una ricerca per e-mail: la scansione è usata solo
-  // per recuperare un conflitto raro (utente Auth esistente senza profilo).
-  const perPage = 200;
-  const maxPages = 25;
-  for (let page = 1; page <= maxPages; page += 1) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
-    if (error) throw new AuthOperationError(error);
-    const match = data.users.find((candidate) =>
-      String(candidate.email ?? "").trim().toLowerCase() === email
-    );
-    if (match) return match;
-    if (data.users.length < perPage) return null;
-  }
-  return null;
-}
-
-async function ensureProfile(
-  admin: SupabaseClient,
-  authUser: User,
-  email: string,
-  displayName: string,
-): Promise<{ profileCreated: boolean; isActive: boolean }> {
-  const { data: profile, error: profileError } = await admin
-    .from("profiles")
-    .select("id,is_active")
-    .eq("id", authUser.id)
-    .maybeSingle();
-  if (profileError) throw profileError;
-  if (profile) {
-    return { profileCreated: false, isActive: profile.is_active === true };
+  if (status === 401 || status === 403 || code === "not_admin") {
+    return {
+      code: "auth_admin_unavailable",
+      message:
+        "Il servizio amministrativo di Supabase non è disponibile. Verifica la configurazione della Edge Function.",
+      status: 503,
+      retryable: false,
+    };
   }
 
-  const { error: insertError } = await admin.from("profiles").insert({
-    id: authUser.id,
-    email,
-    display_name: displayName || email.split("@")[0] || "Famiglia",
-    role: "family",
-    is_active: true,
-  });
-  if (!insertError) return { profileCreated: true, isActive: true };
-
-  // Una richiesta concorrente può avere appena riparato lo stesso profilo.
-  if (insertError.code === "23505") {
-    const { data: concurrentProfile, error: concurrentError } = await admin
-      .from("profiles")
-      .select("is_active")
-      .eq("id", authUser.id)
-      .maybeSingle();
-    if (concurrentError) throw concurrentError;
-    if (concurrentProfile) {
-      return {
-        profileCreated: false,
-        isActive: concurrentProfile.is_active === true,
-      };
+  return operation === "status"
+    ? {
+      code: "account_status_failed",
+      message: "Non è stato possibile verificare lo stato dell'account.",
+      status: 502,
+      retryable: true,
     }
+    : {
+      code: "link_generation_failed",
+      message: "Supabase non ha generato il link di invito.",
+      status: 502,
+      retryable: true,
+    };
+}
+
+function failureResponse(
+  request: Request,
+  failure: {
+    code: string;
+    message: string;
+    status: number;
+    retryable: boolean;
+  },
+): Response {
+  return jsonResponse(
+    request,
+    {
+      ok: false,
+      error: failure.message,
+      code: failure.code,
+      retryable: failure.retryable,
+    },
+    failure.status,
+  );
+}
+
+function normalizeEmail(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function validatedEmail(value: unknown): string {
+  const email = normalizeEmail(value);
+  if (!email || email.endsWith("@invalid.local")) {
+    throw new PublicOperationError(
+      "family_email_missing",
+      "La famiglia non ha un indirizzo e-mail utilizzabile.",
+      400,
+    );
   }
-  throw insertError;
+  if (email.length > 254 || !EMAIL_PATTERN.test(email)) {
+    throw new PublicOperationError(
+      "invalid_email",
+      "L'indirizzo e-mail non è valido.",
+      400,
+    );
+  }
+  return email;
 }
 
 function authUserIsConfirmed(user: User): boolean {
   return Boolean(user.email_confirmed_at || user.confirmed_at);
 }
 
-function allowedRedirect(value?: string): string | undefined {
+function authUserIsDisabled(user: User): boolean {
+  const value = user as unknown as Record<string, unknown>;
+  if (value.deleted_at) return true;
+  if (typeof value.banned_until !== "string" || !value.banned_until) {
+    return false;
+  }
+  const bannedUntil = new Date(value.banned_until);
+  return !Number.isNaN(bannedUntil.getTime()) &&
+    bannedUntil.getTime() > Date.now();
+}
+
+function relationRecord<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function isMissingRelationError(error: unknown): boolean {
+  const value = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  const code = typeof value.code === "string" ? value.code : "";
+  const message = typeof value.message === "string" ? value.message : "";
+  return ["42P01", "PGRST205"].includes(code) ||
+    /family_access_emails.*(does not exist|schema cache|non esiste)/i
+      .test(message);
+}
+
+function allowedRedirect(value?: unknown): string | undefined {
+  if (value !== undefined && typeof value !== "string") {
+    throw new PublicOperationError(
+      "invalid_redirect",
+      "URL di reindirizzamento non autorizzato.",
+      400,
+    );
+  }
+
   const siteUrl = (
     Deno.env.get("SITE_URL") ??
       "https://gestionale.quartomovimento.it"
   ).replace(/\/$/, "");
   const fallback = Deno.env.get("INVITE_REDIRECT_URL") ??
-    (siteUrl ? `${siteUrl}/?auth_action=set-password` : undefined);
+    (siteUrl ? siteUrl + "/?auth_action=set-password" : undefined);
   const candidate = value || fallback;
   if (!candidate) return undefined;
 
@@ -233,7 +300,11 @@ function allowedRedirect(value?: string): string | undefined {
   try {
     parsed = new URL(candidate);
   } catch {
-    throw new Error("redirect_invalid");
+    throw new PublicOperationError(
+      "invalid_redirect",
+      "URL di reindirizzamento non autorizzato.",
+      400,
+    );
   }
 
   const configured = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
@@ -246,8 +317,424 @@ function allowedRedirect(value?: string): string | undefined {
     "http://127.0.0.1:5173",
   ];
   const allowed = new Set(configured.length ? configured : fallbackOrigins);
-  if (!allowed.has(parsed.origin)) throw new Error("redirect_invalid");
+  if (!allowed.has(parsed.origin)) {
+    throw new PublicOperationError(
+      "invalid_redirect",
+      "URL di reindirizzamento non autorizzato.",
+      400,
+    );
+  }
   return parsed.toString();
+}
+
+async function loadFamily(
+  admin: SupabaseClient,
+  familyId: string,
+): Promise<FamilyRecord> {
+  const { data, error } = await admin
+    .from("families")
+    .select("id,display_name,guardian_name,email,is_active")
+    .eq("id", familyId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.is_active) {
+    throw new PublicOperationError(
+      "family_not_found",
+      "Famiglia non trovata o inattiva.",
+      404,
+    );
+  }
+  return data as FamilyRecord;
+}
+
+async function allowedEmailsForFamily(
+  admin: SupabaseClient,
+  family: FamilyRecord,
+): Promise<Set<string>> {
+  const allowed = new Set<string>();
+  const primaryEmail = normalizeEmail(family.email);
+  if (
+    primaryEmail &&
+    EMAIL_PATTERN.test(primaryEmail) &&
+    !primaryEmail.endsWith("@invalid.local")
+  ) {
+    allowed.add(primaryEmail);
+  }
+
+  const accessResult = await admin
+    .from("family_access_emails")
+    .select("email")
+    .eq("family_id", family.id);
+  if (accessResult.error && !isMissingRelationError(accessResult.error)) {
+    throw accessResult.error;
+  }
+  for (const row of accessResult.data ?? []) {
+    const email = normalizeEmail(row.email);
+    if (email) allowed.add(email);
+  }
+
+  const linksResult = await admin
+    .from("family_users")
+    .select(
+      "profile:profiles!family_users_user_id_fkey(email)",
+    )
+    .eq("family_id", family.id);
+  if (linksResult.error) throw linksResult.error;
+  for (const row of linksResult.data ?? []) {
+    const profile = relationRecord<{ email?: unknown }>(row.profile);
+    const email = normalizeEmail(profile?.email);
+    if (email) allowed.add(email);
+  }
+
+  return allowed;
+}
+
+async function assertEmailsBelongToFamily(
+  admin: SupabaseClient,
+  family: FamilyRecord,
+  emails: string[],
+): Promise<void> {
+  const allowed = await allowedEmailsForFamily(admin, family);
+  const rejected = emails.filter((email) => !allowed.has(email));
+  if (!rejected.length) return;
+
+  throw new PublicOperationError(
+    "email_not_in_family",
+    rejected.length === 1
+      ? "L'indirizzo e-mail non appartiene a questa famiglia."
+      : "Uno o più indirizzi e-mail non appartengono a questa famiglia.",
+    403,
+  );
+}
+
+async function findProfileByEmail(
+  admin: SupabaseClient,
+  email: string,
+): Promise<ProfileRecord | null> {
+  const { data, error } = await admin
+    .from("profiles")
+    .select("id,email,is_active,role")
+    .eq("email", email)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? data as ProfileRecord : null;
+}
+
+async function findAuthUsersByEmails(
+  admin: SupabaseClient,
+  emails: string[],
+  operation: InviteAction,
+): Promise<Map<string, User>> {
+  const wanted = new Set(emails);
+  const matches = new Map<string, User>();
+  if (!wanted.size) return matches;
+
+  const perPage = 200;
+  const maxPages = 100;
+  for (let page = 1; page <= maxPages; page += 1) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+    if (error) throw new AuthOperationError(error, operation);
+
+    for (const candidate of data.users) {
+      const candidateEmail = normalizeEmail(candidate.email);
+      if (wanted.has(candidateEmail)) {
+        matches.set(candidateEmail, candidate);
+      }
+    }
+
+    if (matches.size === wanted.size || data.users.length < perPage) break;
+  }
+  return matches;
+}
+
+async function resolveAccounts(
+  admin: SupabaseClient,
+  emails: string[],
+  operation: InviteAction,
+): Promise<AccountResolution[]> {
+  const resolutions: AccountResolution[] = [];
+  const needsDirectoryLookup: string[] = [];
+
+  for (const email of emails) {
+    const profile = await findProfileByEmail(admin, email);
+    let authUser: User | null = null;
+
+    if (profile?.is_active !== false && profile?.role === "family") {
+      const { data, error } = await admin.auth.admin.getUserById(profile.id);
+      if (error && !isUserNotFound(error)) {
+        throw new AuthOperationError(error, operation);
+      }
+      authUser = data?.user ?? null;
+    }
+
+    if (!authUser && !profile) needsDirectoryLookup.push(email);
+    resolutions.push({ email, profile, user: authUser });
+  }
+
+  const directoryUsers = await findAuthUsersByEmails(
+    admin,
+    needsDirectoryLookup,
+    operation,
+  );
+  for (const resolution of resolutions) {
+    if (!resolution.user && !resolution.profile) {
+      resolution.user = directoryUsers.get(resolution.email) ?? null;
+    }
+    if (
+      resolution.user &&
+      normalizeEmail(resolution.user.email) !== resolution.email
+    ) {
+      throw new PublicOperationError(
+        "auth_user_conflict",
+        "L'account Supabase non corrisponde all'indirizzo richiesto.",
+        409,
+      );
+    }
+  }
+
+  return resolutions;
+}
+
+function publicAccountStatus(
+  resolution: AccountResolution,
+): PublicAccountStatus {
+  if (
+    resolution.profile?.is_active === false ||
+    (resolution.user && authUserIsDisabled(resolution.user))
+  ) {
+    return {
+      email: resolution.email,
+      account_status: "disabled",
+      account_active: false,
+      code: "user_inactive",
+      message: "Account disattivato.",
+    };
+  }
+
+  if (resolution.profile && resolution.profile.role !== "family") {
+    return {
+      email: resolution.email,
+      account_status: "role_invalid",
+      account_active: false,
+      code: "user_role_invalid",
+      message: "L'indirizzo appartiene a un account amministrativo.",
+    };
+  }
+
+  if (!resolution.user) {
+    return {
+      email: resolution.email,
+      account_status: "missing",
+      account_active: false,
+    };
+  }
+
+  if (authUserIsConfirmed(resolution.user)) {
+    return {
+      email: resolution.email,
+      account_status: "active",
+      account_active: true,
+    };
+  }
+
+  return {
+    email: resolution.email,
+    account_status: "pending",
+    account_active: false,
+  };
+}
+
+async function ensureProfile(
+  admin: SupabaseClient,
+  authUser: User,
+  email: string,
+  displayName: string,
+): Promise<{ profileCreated: boolean }> {
+  const { data: profile, error: profileError } = await admin
+    .from("profiles")
+    .select("id,email,is_active,role")
+    .eq("id", authUser.id)
+    .maybeSingle();
+  if (profileError) throw profileError;
+
+  if (profile) {
+    if (profile.is_active !== true) {
+      throw new PublicOperationError(
+        "user_inactive",
+        "L'account è disattivato.",
+        409,
+      );
+    }
+    if (profile.role !== "family") {
+      throw new PublicOperationError(
+        "user_role_invalid",
+        "Questo indirizzo appartiene a un account amministrativo.",
+        409,
+      );
+    }
+    return { profileCreated: false };
+  }
+
+  const { error: insertError } = await admin.from("profiles").insert({
+    id: authUser.id,
+    email,
+    display_name: displayName || email.split("@")[0] || "Famiglia",
+    role: "family",
+    is_active: true,
+  });
+  if (!insertError) return { profileCreated: true };
+
+  if (insertError.code === "23505") {
+    const concurrentProfile = await findProfileByEmail(admin, email);
+    if (concurrentProfile?.id === authUser.id) {
+      if (!concurrentProfile.is_active) {
+        throw new PublicOperationError(
+          "user_inactive",
+          "L'account è disattivato.",
+          409,
+        );
+      }
+      if (concurrentProfile.role !== "family") {
+        throw new PublicOperationError(
+          "user_role_invalid",
+          "Questo indirizzo appartiene a un account amministrativo.",
+          409,
+        );
+      }
+      return { profileCreated: false };
+    }
+    throw new PublicOperationError(
+      "auth_user_conflict",
+      "Esiste già un profilo diverso con questa e-mail.",
+      409,
+    );
+  }
+  throw insertError;
+}
+
+async function ensureFamilyLink(
+  admin: SupabaseClient,
+  familyId: string,
+  userId: string,
+): Promise<{ linkCreated: boolean }> {
+  const { data: existing, error: existingError } = await admin
+    .from("family_users")
+    .select("family_id,user_id")
+    .eq("family_id", familyId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing) return { linkCreated: false };
+
+  const { error: insertError } = await admin.from("family_users").insert({
+    family_id: familyId,
+    user_id: userId,
+  });
+  if (!insertError) return { linkCreated: true };
+
+  if (insertError.code === "23505") {
+    const { data: concurrent, error: concurrentError } = await admin
+      .from("family_users")
+      .select("family_id,user_id")
+      .eq("family_id", familyId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (concurrentError) throw concurrentError;
+    if (concurrent) return { linkCreated: false };
+  }
+  throw insertError;
+}
+
+function validActionLink(value: unknown): string | null {
+  if (typeof value !== "string" || !value || value.length > 16384) return null;
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateRequestFields(
+  body: Record<string, unknown>,
+  action: InviteAction,
+): void {
+  if (Object.prototype.hasOwnProperty.call(body, "email")) {
+    throw new PublicOperationError(
+      "legacy_email_not_allowed",
+      "Il campo email non è più accettato.",
+      400,
+    );
+  }
+
+  const allowed = action === "status"
+    ? new Set(["action", "family_id", "target_emails"])
+    : new Set(["action", "family_id", "target_email", "redirect_to"]);
+  const unsupported = Object.keys(body).find((key) => !allowed.has(key));
+  if (unsupported) {
+    throw new PublicOperationError(
+      "invalid_request",
+      "La richiesta contiene campi non supportati.",
+      400,
+    );
+  }
+}
+
+function statusEmails(body: InviteRequest): string[] {
+  if (!Array.isArray(body.target_emails)) {
+    throw new PublicOperationError(
+      "invalid_target_emails",
+      "target_emails deve essere un elenco di indirizzi.",
+      400,
+    );
+  }
+  if (!body.target_emails.length) {
+    throw new PublicOperationError(
+      "family_email_missing",
+      "La famiglia non ha indirizzi e-mail da verificare.",
+      400,
+    );
+  }
+  if (body.target_emails.length > MAX_STATUS_EMAILS) {
+    throw new PublicOperationError(
+      "too_many_target_emails",
+      "Sono stati richiesti troppi indirizzi contemporaneamente.",
+      400,
+    );
+  }
+
+  return Array.from(
+    new Set(body.target_emails.map((value) => validatedEmail(value))),
+  );
+}
+
+async function activeGenerateResponse(
+  request: Request,
+  admin: SupabaseClient,
+  family: FamilyRecord,
+  email: string,
+  authUser: User,
+  linkedExistingUser: boolean,
+): Promise<Response> {
+  const profileState = await ensureProfile(
+    admin,
+    authUser,
+    email,
+    family.guardian_name || family.display_name,
+  );
+  const linkState = await ensureFamilyLink(admin, family.id, authUser.id);
+  return jsonResponse(request, {
+    ok: true,
+    action: "generate_link",
+    family_id: family.id,
+    target_email: email,
+    account_status: "active",
+    account_active: true,
+    link_generated: false,
+    linked_existing_user: linkedExistingUser,
+    profile_repaired: profileState.profileCreated,
+    family_link_created: linkState.linkCreated,
+  });
 }
 
 Deno.serve(async (request) => {
@@ -262,320 +749,240 @@ Deno.serve(async (request) => {
     if (!await userIsAdmin(admin, user.id)) {
       return errorResponse(
         request,
-        "Operazione riservata all'amministratore",
+        "Operazione riservata all'amministratore.",
         403,
         "admin_required",
       );
     }
 
-    let body: InviteRequest;
+    let rawBody: unknown;
     try {
-      body = await readJson<InviteRequest>(request);
+      rawBody = await readJson<unknown>(request);
     } catch {
-      return errorResponse(request, "JSON non valido", 400, "invalid_json");
-    }
-
-    const familyId = String(body.family_id ?? "").trim();
-    const email = String(body.email ?? "").trim().toLowerCase();
-    const displayName = String(
-      body.display_name ?? body.guardian_name ?? "",
-    ).trim();
-    if (!UUID_PATTERN.test(familyId)) {
-      return errorResponse(
-        request,
-        "Famiglia non valida",
+      throw new PublicOperationError(
+        "invalid_json",
+        "JSON non valido.",
         400,
-        "invalid_family",
       );
-    }
-    if (!EMAIL_PATTERN.test(email) || email.length > 254) {
-      return errorResponse(request, "Email non valida", 400, "invalid_email");
     }
     if (
-      body.is_primary !== undefined &&
-      typeof body.is_primary !== "boolean"
+      !rawBody ||
+      typeof rawBody !== "object" ||
+      Array.isArray(rawBody)
     ) {
-      return errorResponse(
-        request,
-        "Indicatore di contatto principale non valido",
+      throw new PublicOperationError(
+        "invalid_request",
+        "La richiesta deve essere un oggetto JSON.",
         400,
-        "invalid_primary_flag",
       );
     }
 
-    const { data: family, error: familyError } = await admin
-      .from("families")
-      .select("id,display_name,is_active")
-      .eq("id", familyId)
-      .maybeSingle();
-    if (familyError) throw familyError;
-    if (!family?.is_active) {
-      return errorResponse(request, "Famiglia non trovata o inattiva", 404);
-    }
-
-    // Il profilo è normalmente sincronizzato con Auth dal trigger. Il recupero
-    // qui sotto gestisce anche utenti Auth preesistenti/orfani e reinviti.
-    const { data: existingProfile, error: profileError } = await admin
-      .from("profiles")
-      .select("id,email,is_active,role")
-      .ilike("email", email)
-      .maybeSingle();
-    if (profileError) throw profileError;
-
-    if (existingProfile && !existingProfile.is_active) {
-      return errorResponse(
-        request,
-        "Utente disattivato",
-        409,
-        "user_inactive",
+    const body = rawBody as Record<string, unknown> & InviteRequest;
+    const action = body.action;
+    if (action !== "status" && action !== "generate_link") {
+      throw new PublicOperationError(
+        "invalid_action",
+        "Azione non supportata.",
+        400,
       );
     }
-    if (existingProfile && existingProfile.role !== "family") {
-      return errorResponse(
-        request,
-        "Questo indirizzo appartiene a un account amministrativo e non può essere collegato a una famiglia",
+    validateRequestFields(body, action);
+
+    const familyId = typeof body.family_id === "string"
+      ? body.family_id.trim()
+      : "";
+    if (!UUID_PATTERN.test(familyId)) {
+      throw new PublicOperationError(
+        "invalid_family",
+        "Famiglia non valida.",
+        400,
+      );
+    }
+    const family = await loadFamily(admin, familyId);
+
+    if (action === "status") {
+      const emails = statusEmails(body);
+      await assertEmailsBelongToFamily(admin, family, emails);
+      const resolutions = await resolveAccounts(admin, emails, action);
+      return jsonResponse(request, {
+        ok: true,
+        action,
+        family_id: family.id,
+        accounts: resolutions.map(publicAccountStatus),
+      });
+    }
+
+    const email = validatedEmail(body.target_email);
+    await assertEmailsBelongToFamily(admin, family, [email]);
+    const [resolution] = await resolveAccounts(admin, [email], action);
+    const initialStatus = publicAccountStatus(resolution);
+
+    if (initialStatus.account_status === "disabled") {
+      throw new PublicOperationError(
+        initialStatus.code || "user_inactive",
+        initialStatus.message || "L'account è disattivato.",
         409,
-        "user_role_invalid",
+      );
+    }
+    if (initialStatus.account_status === "role_invalid") {
+      throw new PublicOperationError(
+        initialStatus.code || "user_role_invalid",
+        initialStatus.message ||
+          "L'indirizzo appartiene a un account amministrativo.",
+        409,
+      );
+    }
+    if (initialStatus.account_status === "active" && resolution.user) {
+      return await activeGenerateResponse(
+        request,
+        admin,
+        family,
+        email,
+        resolution.user,
+        true,
       );
     }
 
     const redirectTo = allowedRedirect(body.redirect_to);
-    const inviteOptions = {
+    const options = {
       ...(redirectTo ? { redirectTo } : {}),
       data: {
-        ...(displayName ? { display_name: displayName } : {}),
-        invited_for_family_id: familyId,
+        display_name: family.guardian_name || family.display_name,
+        invited_for_family_id: family.id,
       },
     };
-
-    let authUser: User | null = null;
-    let linkedExistingUser = Boolean(existingProfile);
-    let invitationSent = false;
-    let manualInviteUrl: string | null = null;
-
-    if (existingProfile) {
-      const { data, error } = await admin.auth.admin.getUserById(
-        existingProfile.id,
-      );
-      if (error || !data.user) {
-        throw new AuthOperationError(
-          error ?? new Error("Utente Auth non trovato"),
-        );
-      }
-      authUser = data.user;
-    }
-
-    // Un utente già confermato va soltanto collegato. Un utente non ancora
-    // confermato viene invece reinvitato: la chiamata è quindi idempotente e
-    // permette di recuperare un precedente invito scaduto o non consegnato.
-    if (!authUser || !authUserIsConfirmed(authUser)) {
-      const { data, error } = await admin.auth.admin.inviteUserByEmail(email, {
-        ...inviteOptions,
+    const { data: linkData, error: linkError } = await admin.auth.admin
+      .generateLink({
+        type: "invite",
+        email,
+        options,
       });
 
-      if (!error && data.user) {
-        authUser = data.user;
-        invitationSent = true;
-      } else {
-        const inviteError = error ?? new Error("Invito non creato");
-        if (isEmailConflict(inviteError)) {
-          // Caso raro: l'utente Auth è confermato ma il trigger non ha creato
-          // (o qualcuno ha rimosso) il profilo applicativo.
-          authUser = authUser ?? await findAuthUserByEmail(admin, email);
-          if (!authUser) throw new AuthOperationError(inviteError);
-          linkedExistingUser = true;
-          if (!authUserIsConfirmed(authUser)) {
-            // Alcune versioni/configurazioni Auth possono rispondere con un
-            // conflitto anche per un account invitato ma non confermato. In
-            // quel caso il retry deve comunque produrre un accesso utilizzabile.
-            const { data: linkData, error: linkError } = await admin.auth.admin
-              .generateLink({
-                type: "invite",
-                email,
-                options: inviteOptions,
-              });
-            const actionLink = linkData?.properties?.action_link;
-            if (!linkError && linkData?.user && actionLink) {
-              authUser = linkData.user;
-              manualInviteUrl = actionLink;
-            } else {
-              throw new AuthOperationError(linkError ?? inviteError);
-            }
-          }
-        } else if (isEmailDeliveryFailure(inviteError)) {
-          // generateLink non invia e-mail. Il link è una credenziale monouso:
-          // viene restituito esclusivamente dopo la verifica JWT+ruolo admin,
-          // con Cache-Control no-store, e non deve mai essere loggato/salvato.
-          const { data: linkData, error: linkError } = await admin.auth.admin
-            .generateLink({
-              type: "invite",
-              email,
-              options: inviteOptions,
-            });
-          const actionLink = linkData?.properties?.action_link;
-          if (!linkError && linkData?.user && actionLink) {
-            authUser = linkData.user;
-            manualInviteUrl = actionLink;
-          } else {
-            const fallbackDetails = authErrorDetails(linkError);
-            console.error(
-              "invite-family manual-link:",
-              JSON.stringify({
-                provider_code: fallbackDetails.code || "unknown",
-                provider_status: fallbackDetails.status || 0,
-              }),
-            );
-            throw new AuthOperationError(inviteError);
-          }
-        } else {
-          throw new AuthOperationError(inviteError);
+    if (linkError) {
+      if (isEmailConflict(linkError)) {
+        const [freshResolution] = await resolveAccounts(
+          admin,
+          [email],
+          action,
+        );
+        const freshStatus = publicAccountStatus(freshResolution);
+        if (freshStatus.account_status === "active" && freshResolution.user) {
+          return await activeGenerateResponse(
+            request,
+            admin,
+            family,
+            email,
+            freshResolution.user,
+            true,
+          );
+        }
+        if (freshStatus.account_status === "disabled") {
+          throw new PublicOperationError(
+            "user_inactive",
+            "L'account è disattivato.",
+            409,
+          );
+        }
+        if (freshStatus.account_status === "role_invalid") {
+          throw new PublicOperationError(
+            "user_role_invalid",
+            "L'indirizzo appartiene a un account amministrativo.",
+            409,
+          );
         }
       }
+      throw new AuthOperationError(linkError, action);
     }
 
-    if (!authUser) {
-      throw new AuthOperationError(new Error("Utente Auth non disponibile"));
+    const actionLink = validActionLink(
+      linkData?.properties?.action_link,
+    );
+    const generatedUser = linkData?.user ?? null;
+    if (
+      !generatedUser ||
+      !actionLink ||
+      normalizeEmail(generatedUser.email) !== email
+    ) {
+      throw new PublicOperationError(
+        "invalid_link_response",
+        "Supabase ha restituito una risposta non valida per il link di invito.",
+        502,
+        true,
+      );
     }
 
     const profileState = await ensureProfile(
       admin,
-      authUser,
+      generatedUser,
       email,
-      displayName || email.split("@")[0] || family.display_name,
+      family.guardian_name || family.display_name,
     );
-    if (!profileState.isActive) {
-      return errorResponse(
-        request,
-        "Utente disattivato",
-        409,
-        "user_inactive",
-      );
-    }
-    const invitedUserId = authUser.id;
-
-    const profileUpdates = {
-      ...(displayName ? { display_name: displayName } : {}),
-      ...(body.phone ? { phone: String(body.phone).trim() } : {}),
-    };
-    if (!existingProfile && Object.keys(profileUpdates).length) {
-      const { error: updateError } = await admin
-        .from("profiles")
-        .update(profileUpdates)
-        .eq("id", invitedUserId);
-      if (updateError) throw updateError;
-    }
-
-    const { data: existingFamilyLink, error: existingFamilyLinkError } =
-      await admin
-        .from("family_users")
-        .select("family_id,user_id")
-        .eq("family_id", familyId)
-        .eq("user_id", invitedUserId)
-        .maybeSingle();
-    if (existingFamilyLinkError) throw existingFamilyLinkError;
-
-    let linkError: { code?: string; message?: string } | null = null;
-    if (existingFamilyLink) {
-      const familyLinkUpdates: Record<string, unknown> = {};
-      if (body.relationship !== undefined) {
-        familyLinkUpdates.relationship =
-          String(body.relationship).trim() || null;
-      }
-      if (body.is_primary !== undefined) {
-        familyLinkUpdates.is_primary = Boolean(body.is_primary);
-      }
-      if (Object.keys(familyLinkUpdates).length) {
-        const result = await admin
-          .from("family_users")
-          .update(familyLinkUpdates)
-          .eq("family_id", familyId)
-          .eq("user_id", invitedUserId);
-        linkError = result.error;
-      }
-    } else {
-      const familyLink: Record<string, unknown> = {
-        family_id: familyId,
-        user_id: invitedUserId,
-      };
-      if (body.relationship !== undefined) {
-        familyLink.relationship = String(body.relationship).trim() || null;
-      }
-      if (body.is_primary !== undefined) {
-        familyLink.is_primary = Boolean(body.is_primary);
-      }
-      const result = await admin
-        .from("family_users")
-        .insert(familyLink);
-      linkError = result.error;
-      // Un invito concorrente può aver creato la stessa associazione.
-      if (linkError?.code === "23505") {
-        const { data: concurrentFamilyLink, error: concurrentFamilyLinkError } =
-          await admin
-            .from("family_users")
-            .select("family_id,user_id")
-            .eq("family_id", familyId)
-            .eq("user_id", invitedUserId)
-            .maybeSingle();
-        if (concurrentFamilyLinkError) throw concurrentFamilyLinkError;
-        if (concurrentFamilyLink) linkError = null;
-      }
-    }
-    if (linkError) throw linkError;
+    const linkState = await ensureFamilyLink(
+      admin,
+      family.id,
+      generatedUser.id,
+    );
 
     return jsonResponse(request, {
       ok: true,
-      user_id: invitedUserId,
-      family_id: familyId,
-      invitation_sent: invitationSent,
-      invitation_delivery: invitationSent
-        ? "email"
-        : manualInviteUrl
-        ? "manual_link"
-        : "not_required",
-      manual_invite_created: Boolean(manualInviteUrl),
-      ...(manualInviteUrl ? { manual_invite_url: manualInviteUrl } : {}),
-      linked_existing_user: linkedExistingUser,
+      action,
+      family_id: family.id,
+      target_email: email,
+      account_status: "pending",
+      account_active: false,
+      link_generated: true,
+      activation_link: actionLink,
+      linked_existing_user: Boolean(resolution.user || resolution.profile),
       profile_repaired: profileState.profileCreated,
+      family_link_created: linkState.linkCreated,
     });
   } catch (error) {
-    const message = publicError(error);
-    if (message === "auth_missing" || message === "auth_invalid") {
-      return errorResponse(request, "Sessione non valida", 401, "unauthorized");
+    if (
+      error instanceof Error &&
+      (error.message === "auth_missing" || error.message === "auth_invalid")
+    ) {
+      return errorResponse(request, "Sessione non valida.", 401, "unauthorized");
     }
-    if (message === "redirect_invalid") {
-      return errorResponse(
-        request,
-        "URL di reindirizzamento non autorizzato",
-        400,
-        "invalid_redirect",
-      );
+
+    if (error instanceof PublicOperationError) {
+      return failureResponse(request, {
+        code: error.code,
+        message: error.message,
+        status: error.status,
+        retryable: error.retryable,
+      });
     }
+
     if (error instanceof AuthOperationError) {
-      const failure = publicInviteFailure(error.providerError);
+      const failure = publicAuthFailure(error.providerError, error.operation);
       const provider = authErrorDetails(error.providerError);
       console.error(
         "invite-family auth:",
         JSON.stringify({
+          action: error.operation,
           code: failure.code,
           provider_code: provider.code || "unknown",
           provider_status: provider.status || 0,
         }),
       );
-      return jsonResponse(
-        request,
-        {
-          ok: false,
-          error: failure.message,
-          code: failure.code,
-          retryable: failure.retryable,
-          ...(failure.action_required
-            ? { action_required: failure.action_required }
-            : {}),
-        },
-        failure.status,
-      );
+      return failureResponse(request, failure);
     }
-    console.error("invite-family:", message);
-    return errorResponse(request, "Impossibile inviare l'invito", 500);
+
+    const value = error && typeof error === "object"
+      ? error as Record<string, unknown>
+      : {};
+    console.error(
+      "invite-family:",
+      JSON.stringify({
+        code: typeof value.code === "string" ? value.code : "unknown",
+        status: typeof value.status === "number" ? value.status : 0,
+      }),
+    );
+    return failureResponse(request, {
+      code: "family_access_failed",
+      message: "Non è stato possibile gestire l'accesso della famiglia.",
+      status: 500,
+      retryable: true,
+    });
   }
 });

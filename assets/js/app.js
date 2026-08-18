@@ -63,6 +63,7 @@
     settingsTab: "school",
     authListener: null,
     paymentReminderChannel: null,
+    familyAccountStatuses: {},
     authFingerprint: null,
     lastDataRefreshAt: 0,
   };
@@ -688,6 +689,20 @@
     );
   }
 
+  function familyPendingAccessEmails(familyOrId) {
+    const family = typeof familyOrId === "string"
+      ? state.data?.families?.find((item) => item.id === familyOrId)
+      : familyOrId;
+    if (!family) return [];
+    return normalizeEmailList(
+      (state.data?.familyAccessEmails || [])
+        .filter((item) => item.family_id === family.id)
+        .map((item) => item.email),
+    ).filter(
+      (email) => isValidEmail(email) && !email.endsWith("@invalid.local"),
+    );
+  }
+
   function familyAccessEmails(familyOrId) {
     const family = typeof familyOrId === "string"
       ? state.data?.families?.find((item) => item.id === familyOrId)
@@ -695,10 +710,34 @@
     if (!family) return [];
     return normalizeEmailList([
       family.email,
+      ...familyPendingAccessEmails(family),
       ...familyLinkedAccessEmails(family),
     ]).filter(
       (email) => isValidEmail(email) && !email.endsWith("@invalid.local"),
     );
+  }
+
+  function familyAccountStatusKey(familyId, email) {
+    return `${familyId}:${String(email || "").trim().toLowerCase()}`;
+  }
+
+  function familyAccountStatus(familyId, email) {
+    return (
+      state.familyAccountStatuses[familyAccountStatusKey(familyId, email)] ||
+      { status: "unknown" }
+    );
+  }
+
+  function rememberFamilyAccountStatuses(familyId, accounts) {
+    (accounts || []).forEach((account) => {
+      const email = normalizeEmailList([account?.email])[0];
+      if (!email) return;
+      state.familyAccountStatuses[familyAccountStatusKey(familyId, email)] = {
+        ...account,
+        email,
+        status: String(account.status || account.account_status || "unknown"),
+      };
+    });
   }
 
   function studentForInvoice(invoice) {
@@ -967,6 +1006,9 @@
         copy.familyUsers = (copy.familyUsers || []).filter(
           (item) => item.family_id === familyId,
         );
+        copy.familyAccessEmails = (copy.familyAccessEmails || []).filter(
+          (item) => item.family_id === familyId,
+        );
         copy.students = copy.students.filter((item) =>
           studentIds.includes(item.id),
         );
@@ -1018,17 +1060,43 @@
       const now = Date.now();
       let familyId = payload.family_id;
       if (!familyId) {
-        familyId = `fam-${now}`;
-        this.data.families.push({
-          id: familyId,
-          display_name:
-            payload.family_display_name ||
-            `Famiglia ${payload.last_name || payload.guardian_name}`,
-          guardian_name: payload.guardian_name,
-          email: payload.email,
-          phone: payload.phone,
-          notes: "",
-        });
+        const normalizedEmail = normalizeEmailList([payload.email])[0] || "";
+        const matchingFamilies = this.data.families.filter(
+          (item) =>
+            normalizeEmailList([item.email])[0] === normalizedEmail ||
+            (this.data.familyAccessEmails || []).some(
+              (candidate) =>
+                candidate.family_id === item.id &&
+                normalizeEmailList([candidate.email])[0] === normalizedEmail,
+            ) ||
+            (this.data.familyUsers || []).some((access) => {
+              const profile = Array.isArray(access.profile)
+                ? access.profile[0]
+                : access.profile;
+              return (
+                access.family_id === item.id &&
+                normalizeEmailList([profile?.email])[0] === normalizedEmail
+              );
+            }),
+        );
+        if (matchingFamilies.length > 1) {
+          throw new Error(
+            "Esistono più famiglie con questa e-mail: seleziona il nucleo esistente.",
+          );
+        }
+        familyId = matchingFamilies[0]?.id || `fam-${now}`;
+        if (!matchingFamilies.length) {
+          this.data.families.push({
+            id: familyId,
+            display_name:
+              payload.family_display_name ||
+              `Famiglia ${payload.last_name || payload.guardian_name}`,
+            guardian_name: payload.guardian_name,
+            email: normalizedEmail,
+            phone: payload.phone,
+            notes: "",
+          });
+        }
       } else {
         const family = this.data.families.find((item) => item.id === familyId);
         if (family) {
@@ -1043,6 +1111,38 @@
           });
         }
       }
+      const family = this.data.families.find((item) => item.id === familyId);
+      if (family && !payload.family_id) {
+        Object.assign(family, {
+          display_name:
+            payload.family_display_name || family.display_name,
+          guardian_name: payload.guardian_name || family.guardian_name,
+          email: payload.email || family.email,
+          phone: payload.phone || family.phone,
+        });
+      }
+      this.data.familyAccessEmails = this.data.familyAccessEmails || [];
+      const requestedAccessEmails = normalizeEmailList([
+        payload.email,
+        ...(payload.access_emails || []),
+      ]);
+      this.data.familyAccessEmails
+        .filter((item) => item.family_id === familyId)
+        .forEach((item) => {
+          item.is_primary = false;
+        });
+      requestedAccessEmails.forEach((email) => {
+        const existingAccess = this.data.familyAccessEmails.find(
+          (item) => item.family_id === familyId && item.email === email,
+        );
+        const values = {
+          family_id: familyId,
+          email,
+          is_primary: email === normalizeEmailList([family?.email])[0],
+        };
+        if (existingAccess) Object.assign(existingAccess, values);
+        else this.data.familyAccessEmails.push(values);
+      });
       const studentId = payload.id || `stu-${now}`;
       const existing = this.data.students.find(
         (item) => item.id === studentId,
@@ -1087,17 +1187,6 @@
         if (enrollment) Object.assign(enrollment, values);
         else this.data.enrollments.push(values);
       }
-      const invitations = [];
-      for (const email of normalizeEmailList(payload.invite_emails || [])) {
-        const result = await this.inviteFamily({ familyId, email });
-        invitations.push({
-          email,
-          sent: Boolean(result?.invitation_sent),
-          linked: Boolean(result?.linked_existing_user),
-          activationLink: null,
-          error: null,
-        });
-      }
       return {
         studentId,
         familyId,
@@ -1106,8 +1195,6 @@
         enrollment: this.data.enrollments.find(
           (item) => item.student_id === studentId && item.is_active !== false,
         ),
-        invitations,
-        inviteSent: invitations.some((item) => item.sent),
       };
     }
 
@@ -1603,18 +1690,78 @@
       return { status: "COMPLETED" };
     }
 
-    async inviteFamily(payload) {
+    async getFamilyAccountStatuses(payload) {
+      const emails = normalizeEmailList(payload?.emails || []);
+      return {
+        ok: true,
+        accounts: emails.map((email) => {
+          const familyAccess = (this.data.familyUsers || []).find((item) => {
+            const profile = Array.isArray(item.profile)
+              ? item.profile[0]
+              : item.profile;
+            return item.family_id === payload.familyId && profile?.email === email;
+          });
+          const profile = Array.isArray(familyAccess?.profile)
+            ? familyAccess.profile[0]
+            : familyAccess?.profile;
+          let accountStatus = "missing";
+          if (profile?.is_active === false) accountStatus = "disabled";
+          else if (profile) {
+            accountStatus = profile.auth_confirmed === false
+              ? "pending"
+              : "active";
+          }
+          return {
+            email,
+            account_status: accountStatus,
+            account_active: accountStatus === "active",
+          };
+        }),
+      };
+    }
+
+    async generateFamilyInviteLink(payload) {
       const email = normalizeEmailList([payload?.email])[0];
-      if (!email) throw new Error("E-mail non valida.");
+      if (!email || email.endsWith("@invalid.local")) {
+        const error = new Error("La famiglia non ha un indirizzo e-mail valido.");
+        error.code = "family_email_missing";
+        throw error;
+      }
+      const family = this.data.families.find(
+        (item) => item.id === payload.familyId,
+      );
+      if (!family) throw new Error("Famiglia non trovata.");
+      if (!familyAccessEmails(family).includes(email)) {
+        throw new Error("L’indirizzo non appartiene a questa famiglia.");
+      }
       this.data.familyUsers = this.data.familyUsers || [];
-      const existing = this.data.familyUsers.find((item) => {
+      let existing = this.data.familyUsers.find((item) => {
         const profile = Array.isArray(item.profile)
           ? item.profile[0]
           : item.profile;
-        return item.family_id === payload.familyId && profile?.email === email;
+        return profile?.email === email;
       });
+      const existingProfile = Array.isArray(existing?.profile)
+        ? existing.profile[0]
+        : existing?.profile;
+      if (existingProfile?.is_active === false) {
+        const error = new Error("Questo account è disattivato.");
+        error.code = "user_inactive";
+        throw error;
+      }
+      if (existingProfile?.auth_confirmed !== false && existingProfile) {
+        if (existing.family_id !== payload.familyId) {
+          this.data.familyUsers.push({ ...existing, family_id: payload.familyId });
+        }
+        return {
+          ok: true,
+          account_status: "active",
+          account_active: true,
+          link_generated: false,
+        };
+      }
       if (!existing) {
-        this.data.familyUsers.push({
+        existing = {
           family_id: payload.familyId,
           user_id: `demo-user-${Date.now()}-${this.data.familyUsers.length}`,
           is_primary: false,
@@ -1623,13 +1770,20 @@
             email,
             display_name: payload.guardianName || email.split("@")[0],
             is_active: true,
+            auth_confirmed: false,
           },
-        });
+        };
+        this.data.familyUsers.push(existing);
+      } else if (existing.family_id !== payload.familyId) {
+        this.data.familyUsers.push({ ...existing, family_id: payload.familyId });
       }
       return {
         demo: true,
-        invitation_sent: !existing,
-        linked_existing_user: Boolean(existing),
+        ok: true,
+        account_status: "pending",
+        account_active: false,
+        link_generated: true,
+        activation_link: `https://demo.quartomovimento.it/invito/${encodeURIComponent(email)}?token=${Date.now()}`,
       };
     }
   }
@@ -1688,10 +1842,34 @@
       }
     }
 
+    async loadFamilyAccessEmails(role) {
+      if (role !== ROLE_ADMIN) return { available: true, rows: [] };
+      try {
+        const rows = await this.query(
+          "family_access_emails",
+          "family_id,email,is_primary,created_at,updated_at",
+          (query) => query.order("created_at", { ascending: true }),
+        );
+        return { available: true, rows };
+      } catch (error) {
+        const message = String(error?.message || "");
+        if (
+          ["42P01", "PGRST205"].includes(error?.code) ||
+          /family_access_emails.*(schema cache|does not exist|non esiste)/i.test(
+            message,
+          )
+        ) {
+          return { available: false, rows: [] };
+        }
+        throw error;
+      }
+    }
+
     async loadData(role) {
       const [
         families,
         familyUsers,
+        familyAccessEmailResult,
         students,
         courses,
         enrollments,
@@ -1714,6 +1892,7 @@
               (query) => query.order("created_at", { ascending: true }),
             )
           : Promise.resolve([]),
+        this.loadFamilyAccessEmails(role),
         this.query("students", "*", (query) =>
           query.order("last_name", { ascending: true }),
         ),
@@ -1750,6 +1929,8 @@
       return {
         families,
         familyUsers,
+        familyAccessEmails: familyAccessEmailResult.rows,
+        familyAccessEmailsAvailable: familyAccessEmailResult.available,
         students:
           role === ROLE_FAMILY
             ? students.filter((item) => item.is_active !== false)
@@ -1776,58 +1957,14 @@
 
     async saveStudent(payload) {
       const { data, error } = await this.client.rpc(
-        "admin_upsert_student_family",
+        "admin_upsert_student_family_with_access",
         { p_payload: payload },
       );
       if (error) throw error;
-      const invitations = [];
-      const primaryEmail = normalizeEmailList([payload.email])[0] || "";
-      for (const email of normalizeEmailList(payload.invite_emails || [])) {
-        try {
-          const invitation = await this.inviteFamily({
-            familyId: data.family.id,
-            email,
-            guardianName:
-              email === primaryEmail ? payload.guardian_name : "",
-          });
-          invitations.push({
-            email,
-            sent: Boolean(invitation?.invitation_sent),
-            linked: Boolean(invitation?.linked_existing_user),
-            activationLink:
-              invitation?.manual_invite_url ||
-              invitation?.activation_link ||
-              null,
-            error: null,
-          });
-        } catch (inviteFailure) {
-          invitations.push({
-            email,
-            sent: false,
-            linked: false,
-            activationLink: inviteFailure?.activationLink || null,
-            error:
-              inviteFailure?.message ||
-              "Non è stato possibile preparare l’invito.",
-          });
-        }
-      }
-      const firstManual = invitations.find((item) => item.activationLink);
-      const failures = invitations.filter(
-        (item) => item.error && !item.activationLink,
-      );
       return {
         ...data,
         studentId: data.student.id,
         familyId: data.family.id,
-        invitations,
-        inviteSent: invitations.some((item) => item.sent),
-        linkedExistingUser: invitations.some((item) => item.linked),
-        inviteError:
-          failures
-            .map((item) => `${item.email}: ${item.error}`)
-            .join(" · ") || null,
-        activationLink: firstManual?.activationLink || null,
       };
     }
 
@@ -2071,16 +2208,10 @@
       return data;
     }
 
-    async inviteFamily(payload) {
+    async invokeFamilyAccess(body) {
       const { data, error } = await this.client.functions.invoke(
         "invite-family",
-        {
-          body: {
-            family_id: payload.familyId,
-            email: payload.email,
-            guardian_name: payload.guardianName,
-          },
-        },
+        { body },
       );
       if (error) {
         let details = null;
@@ -2092,16 +2223,86 @@
         } catch {
           details = null;
         }
-        const inviteError = new Error(
+        const familyAccessError = new Error(
           details?.message ||
             details?.error ||
             error.message ||
-            "Impossibile inviare l’invito alla famiglia.",
+            "Impossibile gestire l’accesso della famiglia.",
         );
-        inviteError.code = details?.code || "invite_failed";
-        inviteError.activationLink =
-          details?.manual_invite_url || details?.activation_link || null;
-        throw inviteError;
+        familyAccessError.code = details?.code || "family_access_failed";
+        familyAccessError.retryable = Boolean(details?.retryable);
+        throw familyAccessError;
+      }
+      if (!data || data.ok !== true) {
+        const invalidResponse = new Error(
+          data?.error || "Risposta non valida dalla funzione di accesso famiglia.",
+        );
+        invalidResponse.code = data?.code || "invalid_edge_response";
+        throw invalidResponse;
+      }
+      return data;
+    }
+
+    async getFamilyAccountStatuses(payload) {
+      const requestedEmails = normalizeEmailList(payload.emails || []);
+      const data = await this.invokeFamilyAccess({
+        action: "status",
+        family_id: payload.familyId,
+        target_emails: requestedEmails,
+      });
+      const allowedStatuses = new Set([
+        "missing",
+        "pending",
+        "active",
+        "disabled",
+        "role_invalid",
+      ]);
+      const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      const returnedEmails = normalizeEmailList(
+        accounts.map((account) => account?.email),
+      );
+      if (
+        accounts.length !== requestedEmails.length ||
+        returnedEmails.length !== requestedEmails.length ||
+        requestedEmails.some((email) => !returnedEmails.includes(email)) ||
+        accounts.some(
+          (account) => !allowedStatuses.has(String(account?.account_status)),
+        )
+      ) {
+        const error = new Error(
+          "La funzione non ha restituito uno stato account valido.",
+        );
+        error.code = "invalid_edge_response";
+        throw error;
+      }
+      return {
+        ...data,
+        accounts: requestedEmails.map((email) =>
+          accounts.find(
+            (account) => normalizeEmailList([account?.email])[0] === email,
+          ),
+        ),
+      };
+    }
+
+    async generateFamilyInviteLink(payload) {
+      const requestedEmail = normalizeEmailList([payload.email])[0] || "";
+      const data = await this.invokeFamilyAccess({
+        action: "generate_link",
+        family_id: payload.familyId,
+        target_email: requestedEmail,
+      });
+      if (
+        normalizeEmailList([data.target_email])[0] !== requestedEmail ||
+        !["active", "pending"].includes(data.account_status) ||
+        (data.account_status !== "active" &&
+          (!data.link_generated || !data.activation_link))
+      ) {
+        const error = new Error(
+          "Supabase non ha restituito un link di invito valido.",
+        );
+        error.code = "invalid_edge_response";
+        throw error;
       }
       return data;
     }
@@ -4055,13 +4256,17 @@
     const family = student ? familyForStudent(student) : null;
     const accessEmails = familyAccessEmails(family);
     const linkedEmails = familyLinkedAccessEmails(family);
+    const primaryEmail = normalizeEmailList([family?.email])[0] || "";
+    const additionalEmails = accessEmails.filter(
+      (email) => email !== primaryEmail,
+    );
     const enrollment = student ? enrollmentForStudent(student.id) : null;
     const defaultEnd = state.data.settings.academic_year_end || "";
     openModal({
       title: student ? `Modifica ${fullName(student)}` : "Nuovo allievo",
       subtitle: student
         ? "Aggiorna anagrafica, corso e piano."
-        : "Aggiungi l’allievo e prepara l’accesso della famiglia.",
+        : "Aggiungi l’allievo; il link famiglia si genera poi dalla sua scheda.",
       className: "modal--lg",
       body: `
         <form id="student-form">
@@ -4080,7 +4285,7 @@
           </div>
           <div class="setting-section">
             <h3>Famiglia e contatti</h3>
-            <p>Ogni indirizzo invitato potrà accedere alla stessa area riservata della famiglia.</p>
+            <p>Gli indirizzi della stessa famiglia restano collegati allo stesso nucleo, anche in presenza di fratelli.</p>
             <div class="form-grid">
               <div class="field field--full">
                 <label for="student-family-id">Nucleo esistente</label>
@@ -4093,8 +4298,8 @@
               <div class="field"><label for="family-display-name">Nome famiglia</label><input class="input" id="family-display-name" name="family_display_name" value="${escapeHTML(family?.display_name || "")}" placeholder="Es. Famiglia Bianchi" /></div>
               <div class="field"><label for="guardian-email">E-mail principale</label><input class="input" id="guardian-email" name="email" type="email" value="${escapeHTML(family?.email || "")}" required /></div>
               <div class="field"><label for="guardian-phone">Telefono</label><input class="input" id="guardian-phone" name="phone" type="tel" value="${escapeHTML(family?.phone || "")}" /></div>
-              ${linkedEmails.length ? `<div class="field field--full"><label>Accessi già collegati</label><p class="field-hint">${linkedEmails.map((email) => escapeHTML(email)).join(" · ")}</p></div>` : `<div class="field field--full"><p class="field-hint">Non è ancora collegato alcun account: salva per preparare l’invito.</p></div>`}
-              <div class="field field--full"><label for="guardian-additional-emails">Altre e-mail da invitare</label><textarea class="textarea" id="guardian-additional-emails" name="additional_emails" rows="3" placeholder="Un indirizzo per riga, oppure separati da virgola"></textarea><p class="field-hint">Puoi aggiungere fino a 10 nuovi indirizzi. Gli accessi esistenti non vengono rimossi cancellando questo campo.</p></div>
+              ${linkedEmails.length ? `<div class="field field--full"><label>Account già collegati</label><p class="field-hint">${linkedEmails.map((email) => escapeHTML(email)).join(" · ")}</p></div>` : `<div class="field field--full"><p class="field-hint">Dopo il salvataggio potrai generare manualmente il link dalla scheda dell’allievo.</p></div>`}
+              <div class="field field--full"><label for="guardian-additional-emails">Altre e-mail di accesso</label><textarea class="textarea" id="guardian-additional-emails" name="additional_emails" rows="3" placeholder="Un indirizzo per riga, oppure separati da virgola">${escapeHTML(additionalEmails.join("\n"))}</textarea><p class="field-hint">Puoi indicare fino a 10 indirizzi aggiuntivi. Nessuna e-mail viene inviata automaticamente.</p></div>
             </div>
           </div>
           <div class="setting-section">
@@ -4128,18 +4333,78 @@
       footer: `
         ${student ? `<button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina allievo</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button>
-        ${student && accessEmails[0] ? `<button class="btn btn--secondary" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(accessEmails[0])}" data-guardian-name="${escapeHTML(family.guardian_name || "")}">${icon("mail", 15)} Reinvia accesso principale</button>` : ""}
-        <button class="btn btn--primary" type="submit" form="student-form">${student ? "Salva modifiche" : "Aggiungi e invita"}</button>
+        <button class="btn btn--primary" type="submit" form="student-form">${student ? "Salva modifiche" : "Aggiungi allievo"}</button>
       `,
     });
   }
 
-  function openStudentDetails(studentId) {
+  function familyAccountStatusPresentation(account) {
+    const status = account?.status || account?.account_status || "unknown";
+    if (status === "active") {
+      return {
+        label: "Account attivo",
+        badgeClass: "badge--success",
+        canGenerate: false,
+        buttonLabel: "",
+      };
+    }
+    if (status === "pending") {
+      return {
+        label: "In attesa di attivazione",
+        badgeClass: "badge--warning",
+        canGenerate: true,
+        buttonLabel: "Genera nuovo link",
+      };
+    }
+    if (status === "disabled") {
+      return {
+        label: "Account disattivato",
+        badgeClass: "badge--danger",
+        canGenerate: false,
+        buttonLabel: "",
+      };
+    }
+    if (status === "role_invalid") {
+      return {
+        label: "Indirizzo non utilizzabile",
+        badgeClass: "badge--danger",
+        canGenerate: false,
+        buttonLabel: "",
+      };
+    }
+    return {
+      label: status === "error" ? "Stato non disponibile" : "Account da attivare",
+      badgeClass: status === "error" ? "badge--danger" : "badge--plain",
+      canGenerate: true,
+      buttonLabel: "Genera link di invito",
+    };
+  }
+
+  async function openStudentDetails(studentId, actionTarget) {
     const student = state.data.students.find((item) => item.id === studentId);
     if (!student) return;
     const family = familyForStudent(student);
     const accessEmails = familyAccessEmails(family);
-    const linkedEmails = familyLinkedAccessEmails(family);
+    let statusError = null;
+    if (family && accessEmails.length) {
+      setButtonLoading(actionTarget, true, "Verifica…");
+      try {
+        const result = await state.store.getFamilyAccountStatuses({
+          familyId: family.id,
+          emails: accessEmails,
+        });
+        rememberFamilyAccountStatuses(family.id, result.accounts);
+      } catch (error) {
+        statusError = error;
+        accessEmails.forEach((email) => {
+          state.familyAccountStatuses[
+            familyAccountStatusKey(family.id, email)
+          ] = { email, status: "error" };
+        });
+      } finally {
+        setButtonLoading(actionTarget, false);
+      }
+    }
     const course = courseForStudent(student.id);
     const enrollment = enrollmentForStudent(student.id);
     const stats = studentAttendanceStats(student.id);
@@ -4166,6 +4431,7 @@
         <div class="setting-section">
           <h3>Contatti famiglia</h3>
           <p>${escapeHTML(family?.display_name || "")}</p>
+          ${statusError ? `<div class="info-callout" style="margin-bottom:12px">${icon("alert", 18)}<p>Non è stato possibile verificare lo stato degli account. Puoi riprovare a generare il link; se il problema continua, controlla il deploy della funzione.</p></div>` : ""}
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.guardian_name || "—")}</strong><span>Genitore o tutore</span></span></div>
             ${accessEmails.length
@@ -4174,8 +4440,10 @@
                     (email) => {
                       const isPrimary =
                         email === normalizeEmailList([family.email])[0];
-                      const isLinked = linkedEmails.includes(email);
-                      return `<div class="activity-item"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"} · ${isLinked ? "collegato" : "da invitare"}</span></span><button class="row-action" type="button" data-action="invite-family" data-family-id="${escapeHTML(family.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" aria-label="Invia o reinvia accesso a ${escapeHTML(email)}">${icon("mail", 16)}</button></div>`;
+                      const presentation = familyAccountStatusPresentation(
+                        familyAccountStatus(family.id, email),
+                      );
+                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--secondary btn--sm" type="button" data-action="generate-family-link" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}">${icon("copy", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
                     },
                   )
                   .join("")
@@ -5302,6 +5570,7 @@
     state.profile = null;
     state.role = null;
     state.data = null;
+    state.familyAccountStatuses = {};
     state.selectedStudentId = null;
     state.store =
       state.mode === "demo" ? new DemoStore() : new SupabaseStore(state.supabase);
@@ -5374,10 +5643,11 @@
     );
   }
 
-  async function copyValue(value) {
+  async function copyTextToClipboard(value) {
+    if (!value) return false;
     try {
       await navigator.clipboard.writeText(value);
-      toast("Copiato", "Ora puoi incollare il dato dove ti serve.");
+      return true;
     } catch {
       const textarea = document.createElement("textarea");
       textarea.value = value;
@@ -5385,92 +5655,117 @@
       textarea.style.opacity = "0";
       document.body.appendChild(textarea);
       textarea.select();
-      document.execCommand("copy");
-      textarea.remove();
-      toast("Copiato", "Ora puoi incollare il dato dove ti serve.");
+      try {
+        return document.execCommand("copy");
+      } finally {
+        textarea.remove();
+      }
     }
   }
 
-  function openManualInvitationLink(link, email) {
+  async function copyValue(value) {
+    const copied = await copyTextToClipboard(value);
+    toast(
+      copied ? "Copiato" : "Copia non riuscita",
+      copied
+        ? "Ora puoi incollare il dato dove ti serve."
+        : "Seleziona il testo e copialo manualmente.",
+      copied ? "success" : "error",
+    );
+    return copied;
+  }
+
+  async function copyInvitationLink(actionTarget) {
+    const copied = await copyTextToClipboard(actionTarget.dataset.value || "");
+    if (!copied) {
+      toast(
+        "Copia non riuscita",
+        "Seleziona il link nel campo e copialo manualmente.",
+        "error",
+      );
+      return;
+    }
+    actionTarget.innerHTML = `${icon("checkSimple", 15)} Link copiato`;
+    actionTarget.setAttribute("aria-label", "Link copiato");
+    toast("Link copiato", "Ora puoi inviarlo personalmente al genitore.");
+  }
+
+  function isValidActivationLink(value) {
+    try {
+      const parsed = new URL(value);
+      return ["https:", "http:"].includes(parsed.protocol);
+    } catch {
+      return false;
+    }
+  }
+
+  function openManualInvitationLink(link, email, context) {
+    const details = context || {};
     openModal({
-      title: "Invito pronto da condividere",
-      subtitle: "L’e-mail automatica non è disponibile, ma l’accesso è stato preparato.",
+      title: "Link di invito pronto",
+      subtitle: "Nessuna e-mail è stata inviata automaticamente.",
       className: "modal--sm",
       body: `
-        <div class="info-callout">${icon("info", 18)}<p>Invia questo link personale a <strong>${escapeHTML(email)}</strong>. Il link è temporaneo e consente di impostare la password.</p></div>
-        <div class="field" style="margin-top:16px"><label for="manual-invite-link">Link di attivazione</label><input class="input" id="manual-invite-link" value="${escapeHTML(link)}" readonly /></div>
+        <div class="info-callout">${icon("info", 18)}<p>Link personale per <strong>${escapeHTML(email)}</strong>. Copialo e condividilo direttamente con il genitore; il link è temporaneo.</p></div>
+        <div class="field" style="margin-top:16px"><label for="manual-invite-link">Link di invito</label><input class="input" id="manual-invite-link" value="${escapeHTML(link)}" readonly spellcheck="false" /></div>
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--primary" type="button" data-action="copy-value" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia link</button>`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--secondary" type="button" data-action="generate-family-link" data-family-id="${escapeHTML(details.familyId || "")}" data-student-id="${escapeHTML(details.studentId || "")}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(details.guardianName || "")}">${icon("repeat", 15)} Genera nuovo link</button><button class="btn btn--primary" type="button" data-action="copy-invitation-link" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia link</button>`,
     });
   }
 
-  function openInvitationResults(invitations, studentUpdated) {
-    const rows = (invitations || [])
-      .map((invitation, index) => {
-        let outcome = '<span class="badge badge--success">Invito inviato</span>';
-        if (invitation.activationLink) {
-          outcome = '<span class="badge badge--warning">Link manuale</span>';
-        } else if (invitation.error) {
-          outcome = '<span class="badge badge--danger">Da riprovare</span>';
-        } else if (invitation.linked) {
-          outcome = '<span class="badge badge--success">Account collegato</span>';
-        }
-        return `
-          <div class="setting-section"${index === 0 ? ' style="margin-top:0"' : ""}>
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
-              <strong>${escapeHTML(invitation.email)}</strong>
-              ${outcome}
-            </div>
-            ${invitation.activationLink
-              ? `<p class="field-hint" style="margin-top:8px">L’e-mail automatica non è disponibile: condividi questo link personale e temporaneo.</p><div class="field" style="margin-top:10px"><label for="manual-invite-link-${index}">Link di attivazione</label><input class="input" id="manual-invite-link-${index}" value="${escapeHTML(invitation.activationLink)}" readonly /></div><button class="btn btn--secondary btn--sm" type="button" data-action="copy-value" data-value="${escapeHTML(invitation.activationLink)}">${icon("copy", 15)} Copia link</button>`
-              : invitation.error
-                ? `<p class="field-error" style="margin-top:8px">${escapeHTML(invitation.error)}</p>`
-                : `<p class="field-hint" style="margin-top:8px">${invitation.linked ? "L’account esistente ora accede alla famiglia." : "Il messaggio è stato affidato al servizio e-mail."}</p>`}
-          </div>
-        `;
-      })
-      .join("");
-    openModal({
-      title: studentUpdated ? "Allievo aggiornato" : "Allievo aggiunto",
-      subtitle: "Esito degli accessi famiglia.",
-      className: "modal--sm",
-      body: rows,
-      footer: '<button class="btn btn--primary" type="button" data-action="close-modal">Ho finito</button>',
-    });
-  }
-
-  async function handleInviteFamilyAction(actionTarget) {
-    setButtonLoading(actionTarget, true, "Invio…");
+  async function handleGenerateFamilyLinkAction(actionTarget) {
+    const familyId = actionTarget.dataset.familyId;
+    const studentId = actionTarget.dataset.studentId;
+    const email = normalizeEmailList([actionTarget.dataset.email])[0] || "";
+    if (!email || email.endsWith("@invalid.local")) {
+      toast(
+        "E-mail famiglia mancante",
+        "Inserisci un indirizzo valido nell’anagrafica prima di generare il link.",
+        "error",
+      );
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Generazione…");
     try {
-      const result = await state.store.inviteFamily({
-        familyId: actionTarget.dataset.familyId,
-        email: actionTarget.dataset.email,
+      const result = await state.store.generateFamilyInviteLink({
+        familyId,
+        email,
         guardianName: actionTarget.dataset.guardianName,
       });
-      const manualInviteUrl =
-        result?.manual_invite_url || result?.activation_link || null;
-      if (manualInviteUrl && !result?.invitation_sent) {
-        openManualInvitationLink(manualInviteUrl, actionTarget.dataset.email);
-      } else {
+      if (result.account_status === "active" || result.account_active === true) {
+        rememberFamilyAccountStatuses(familyId, [
+          { email, account_status: "active", account_active: true },
+        ]);
         closeModal();
-        toast(
-          result?.linked_existing_user ? "Accesso collegato" : "Invito inviato",
-          result?.linked_existing_user
-            ? "La famiglia aveva già un account: ora è collegato all’allievo."
-            : `L’e-mail di accesso è stata inviata a ${actionTarget.dataset.email}.`,
-        );
+        toast("Account attivo", "Non è necessario generare un nuovo invito.");
+        if (studentId) await openStudentDetails(studentId);
+        return;
       }
+      const activationLink = result.activation_link || "";
+      if (!result.link_generated || !isValidActivationLink(activationLink)) {
+        const error = new Error(
+          "Supabase non ha restituito un link di invito valido.",
+        );
+        error.code = "invalid_edge_response";
+        throw error;
+      }
+      rememberFamilyAccountStatuses(familyId, [
+        { email, account_status: "pending", account_active: false },
+      ]);
+      openManualInvitationLink(activationLink, email, {
+        familyId,
+        studentId,
+        guardianName: actionTarget.dataset.guardianName,
+      });
     } catch (error) {
-      if (error?.activationLink) {
-        openManualInvitationLink(error.activationLink, actionTarget.dataset.email);
-      } else {
-        setButtonLoading(actionTarget, false);
-        toast(
-          "Invito non inviato",
-          error.message || "Controlla la configurazione e riprova.",
-          "error",
-        );
-      }
+      setButtonLoading(actionTarget, false);
+      toast(
+        error?.code === "family_email_missing"
+          ? "E-mail famiglia mancante"
+          : "Link non generato",
+        error.message || "Controlla la configurazione Supabase e riprova.",
+        "error",
+      );
     }
   }
 
@@ -5561,11 +5856,11 @@
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "view-student") {
-      openStudentDetails(actionTarget.dataset.studentId);
+      await openStudentDetails(actionTarget.dataset.studentId, actionTarget);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "invite-family") {
-      await handleInviteFamilyAction(actionTarget);
+    } else if (action === "generate-family-link") {
+      await handleGenerateFamilyLinkAction(actionTarget);
     } else if (action === "open-lesson-modal") {
       openLessonModal(actionTarget.dataset.date, {
         courseId: actionTarget.dataset.courseId,
@@ -5686,6 +5981,8 @@
       downloadStudentCalendar(actionTarget.dataset.studentId);
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
+    } else if (action === "copy-invitation-link") {
+      await copyInvitationLink(actionTarget);
     } else if (action === "create-makeup-lesson") {
       const courseId = actionTarget.dataset.courseId;
       closeModal();
@@ -5760,8 +6057,8 @@
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "invite-family") {
-      await handleInviteFamilyAction(actionTarget);
+    } else if (action === "generate-family-link") {
+      await handleGenerateFamilyLinkAction(actionTarget);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
     } else if (action === "edit-lesson") {
@@ -5808,6 +6105,8 @@
       }
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
+    } else if (action === "copy-invitation-link") {
+      await copyInvitationLink(actionTarget);
     } else if (action === "simulate-paypal") {
       setButtonLoading(actionTarget, true, "Pagamento…");
       try {
@@ -5891,6 +6190,15 @@
         const input = document.getElementById(id);
         if (input) input.value = value || "";
       });
+      const additionalEmails = document.getElementById(
+        "guardian-additional-emails",
+      );
+      if (additionalEmails) {
+        const primaryEmail = normalizeEmailList([family.email])[0] || "";
+        additionalEmails.value = familyAccessEmails(family)
+          .filter((email) => email !== primaryEmail)
+          .join("\n");
+      }
     }
   });
 
@@ -5937,48 +6245,19 @@
           throw new Error("Puoi aggiungere al massimo 10 nuovi indirizzi alla volta.");
         }
         values.email = primaryEmail;
-        const currentStudent = values.id
-          ? state.data.students.find((item) => item.id === values.id)
-          : null;
-        const selectedFamily = state.data.families.find(
-          (item) =>
-            item.id ===
-            (values.family_id || currentStudent?.family_id || ""),
-        );
-        const alreadyLinked = new Set(
-          familyLinkedAccessEmails(selectedFamily),
-        );
-        values.invite_emails = normalizeEmailList([
+        values.access_emails = normalizeEmailList([
           primaryEmail,
           ...additionalEmails,
-        ]).filter((email) => !alreadyLinked.has(email));
-        const result = await state.store.saveStudent(values);
+        ]);
+        await state.store.saveStudent(values);
         closeModal();
         await refreshData();
-        const invitations = result.invitations || [];
-        if (
-          invitations.some(
-            (item) => item.activationLink || (item.error && !item.activationLink),
-          )
-        ) {
-          openInvitationResults(invitations, Boolean(values.id));
-        } else if (values.id && !invitations.length) {
-          toast("Allievo aggiornato", "Le modifiche sono state salvate.");
-        } else if (invitations.length && invitations.every((item) => item.linked)) {
-          toast(
-            values.id ? "Accessi collegati" : "Allievo aggiunto",
-            "Gli account esistenti sono stati collegati alla famiglia.",
-          );
-        } else if (invitations.length) {
-          toast(
-            values.id ? "Allievo aggiornato" : "Allievo aggiunto",
-            invitations.length === 1
-              ? "L’invito è stato inviato."
-              : `${invitations.length} inviti sono stati preparati in sequenza.`,
-          );
-        } else {
-          toast("Allievo aggiunto", "I dati sono stati salvati.");
-        }
+        toast(
+          values.id ? "Allievo aggiornato" : "Allievo aggiunto",
+          values.id
+            ? "Le modifiche sono state salvate."
+            : "I dati sono salvati. Genera il link di invito dalla scheda dell’allievo.",
+        );
       } else if (formId === "lesson-form") {
         const start = romeDateTime(values.date, values.time);
         if (Number.isNaN(start.getTime())) {
@@ -6310,6 +6589,7 @@
               state.profile = null;
               state.role = null;
               state.data = null;
+              state.familyAccountStatuses = {};
               renderLogin();
             } else if (
               authSession?.user &&

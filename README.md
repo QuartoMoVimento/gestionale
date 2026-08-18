@@ -143,7 +143,9 @@ annullamenti contabili tracciati e restringe la visibilità delle associazioni
 tra familiari e `011` disattiva le notifiche interne e le segnalazioni di
 bonifico inviate dalle famiglie, preservando senza modificarle le righe
 storiche. `012` aggiunge i promemoria di pagamento a senso unico
-amministratrice→famiglia.
+amministratrice→famiglia. `013` separa il salvataggio degli allievi dalla
+creazione degli accessi: deduplica i nuclei per e-mail, conserva gli indirizzi
+famiglia senza creare utenti Auth e abilita la generazione manuale dei link.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
@@ -177,23 +179,24 @@ Nel Dashboard Supabase:
    - redirect locali aggiuntivi: `http://localhost:5173/**` e
      `http://127.0.0.1:5173/**`;
 3. configurare un server SMTP personalizzato in **Authentication → SMTP
-   Settings**, con mittente verificato, quindi personalizzare i template email
-   di invito e recupero password. Senza SMTP l'app genera per l'amministratrice
-   un link di attivazione manuale da condividere in modo riservato;
+   Settings** soltanto se si vogliono usare le funzioni che spediscono davvero
+   e-mail, come recupero password e magic link. La creazione degli accessi
+   famiglia non usa SMTP e non invia messaggi: genera un link che
+   l'amministratrice copia e condivide personalmente;
 4. creare o invitare dal Dashboard l'account Auth della prima amministratrice
    con indirizzo `quartomov@gmail.com`, senza salvare password nel repository,
    quindi assegnargli ruolo e nome visualizzato come indicato nella sezione
    seguente;
-5. usare successivamente la funzione `invite-family`: l'invito di utenti è
-   un'operazione privilegiata e non deve essere implementato dal browser con una
-   service key.
+5. usare successivamente la funzione `invite-family` per verificare lo stato
+   dell'account e generare il link manuale. È un'operazione privilegiata e non
+   deve essere implementata dal browser con una service key.
 
-Il template di invito personalizzato è versionato in
-`supabase/templates/invite.html` e collegato da `supabase/config.toml`. Nei
-progetti Free creati dal 3 giugno 2026 Supabase non consente però di
-personalizzare i template mentre si usa il servizio SMTP predefinito: questo
-progetto richiede quindi un SMTP personalizzato (oppure un piano a pagamento)
-prima di poter attivare il messaggio con logo e testi Quarto MoVimento. Vedere
+Il template di invito personalizzato resta versionato in
+`supabase/templates/invite.html` per eventuali inviti inviati direttamente dal
+Dashboard, ma il flusso dell'applicazione non lo usa e non genera alcuna e-mail.
+Per gli altri messaggi Auth, nei progetti Free creati dal 3 giugno 2026 Supabase
+non consente di personalizzare i template mentre si usa il servizio SMTP
+predefinito. Vedere
 [Auth email templates](https://supabase.com/docs/guides/auth/auth-email-templates),
 [Custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp) e
 [la modifica per il piano Free](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
@@ -231,7 +234,7 @@ Le funzioni previste sono:
 
 | Funzione | Scopo | Autorizzazione applicativa |
 | --- | --- | --- |
-| `invite-family` | crea/invita un accesso famiglia | sessione verificata e ruolo admin |
+| `invite-family` | verifica l'account e genera un link famiglia senza inviare e-mail | sessione verificata e ruolo admin |
 | `paypal-create-order` | crea un ordine dall'importo della scadenza nel DB | sessione e proprietà della scadenza verificate |
 | `paypal-capture-order` | cattura e registra il pagamento | sessione e proprietà della scadenza verificate |
 | `paypal-webhook` | riceve e riconcilia gli eventi PayPal | firma PayPal obbligatoria |
@@ -298,6 +301,35 @@ contiene origini, quindi il dominio va indicato senza slash finale o percorsi.
 Se il secret remoto contiene ancora il vecchio valore GitHub Pages, aggiornarlo
 con `supabase secrets set` e ripubblicare le Edge Functions: un valore esplicito
 ha precedenza sulla allowlist predefinita nel codice.
+
+### Link famiglia manuali
+
+Il salvataggio di un allievo usa
+`admin_upsert_student_family_with_access`: salva allievo, iscrizione e contatti,
+riusa il nucleo già associato alla stessa e-mail e non chiama Supabase Auth.
+Gli indirizzi sono conservati in `family_access_emails`, leggibile dal browser
+solo per un'amministratrice autenticata.
+
+Aprendo la scheda dell'allievo, il frontend chiede a `invite-family` lo stato
+Auth. Per un account non ancora confermato mostra **Genera link di invito** o
+**Genera nuovo link**; per un account confermato mostra **Account attivo**. La
+funzione usa `auth.admin.generateLink({ type: "invite" })`: il link torna nella
+sola risposta HTTPS con `Cache-Control: no-store`, non viene salvato né inserito
+nei log e nessuna chiave amministrativa raggiunge il frontend.
+
+Per pubblicare questo flusso applicare prima la migrazione `013`, poi distribuire
+la Edge Function e infine il frontend:
+
+```bash
+npx supabase db push --dry-run
+npx supabase db push
+npx supabase functions deploy invite-family
+git push origin main
+```
+
+Non servono nuovi secret. Restano necessari i valori server-side già descritti
+sopra; in particolare `SITE_URL` deve puntare a
+`https://gestionale.quartomovimento.it`.
 
 ## PayPal Sandbox
 

@@ -1621,6 +1621,15 @@ h4 {
   gap: 11px;
 }
 
+.activity-item--with-action {
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.activity-item--with-action > .btn {
+  max-width: 190px;
+}
+
 .activity-item + .activity-item {
   border-top: 1px solid var(--line);
 }
@@ -1648,6 +1657,24 @@ h4 {
   margin-top: 2px;
   color: var(--ink-soft);
   font-size: 10px;
+}
+
+.activity-copy .badge {
+  display: inline-flex;
+  width: max-content;
+  margin-top: 6px;
+}
+
+.activity-copy .badge--success {
+  color: var(--success);
+}
+
+.activity-copy .badge--warning {
+  color: var(--warning);
+}
+
+.activity-copy .badge--danger {
+  color: var(--danger);
 }
 
 .progress-block {
@@ -3011,6 +3038,16 @@ h4 {
 
   .field--full {
     grid-column: auto;
+  }
+
+  .activity-item--with-action {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .activity-item--with-action > .btn {
+    max-width: 100%;
+    grid-column: 2;
+    justify-self: start;
   }
 
   .toolbar {
