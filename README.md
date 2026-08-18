@@ -172,7 +172,8 @@ sviluppo e test.
 
 ### Calendario collegato ai corsi
 
-In **Impostazioni → Corsi** ogni corso può avere una programmazione composta da
+Nella voce **Corsi**, subito sotto **Calendario** nel menu amministrativo, ogni
+corso può avere una programmazione composta da
 data di inizio, data di fine, giorno della settimana e ora di inizio. I quattro
 campi vanno compilati insieme; lasciandoli tutti vuoti il corso resta senza
 ricorrenza fissa.

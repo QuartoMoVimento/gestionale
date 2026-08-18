@@ -28,6 +28,7 @@
     "attendance",
     "students",
     "calendar",
+    "courses",
     "makeups",
     "payments",
     "settings",
@@ -2554,6 +2555,7 @@
       ["attendance", "Presenze", "check", null],
       ["students", "Allievi", "users", null],
       ["calendar", "Calendario", "calendar", null],
+      ["courses", "Corsi", "music", null],
       ["makeups", "Recuperi", "repeat", null],
       ["payments", "Pagamenti", "wallet", overdue || null],
       ["settings", "Impostazioni", "settings", null],
@@ -2659,9 +2661,9 @@
             }
             ${view}
           </main>
-          <nav class="bottom-nav" aria-label="Navigazione mobile" style="--nav-count:${Math.min(nav.length, 6)}">
+          <nav class="bottom-nav${state.role === ROLE_ADMIN ? " bottom-nav--admin" : ""}" aria-label="Navigazione mobile" style="--nav-count:${Math.min(nav.length, 7)}">
             ${nav
-              .slice(0, 6)
+              .slice(0, 7)
               .map((item) => navLink(item, prefix, route))
               .join("")}
           </nav>
@@ -2689,6 +2691,7 @@
       attendance: renderAdminAttendance,
       students: renderAdminStudents,
       calendar: renderAdminCalendar,
+      courses: renderAdminCourses,
       makeups: renderAdminMakeups,
       payments: renderAdminPayments,
       settings: renderAdminSettings,
@@ -2901,7 +2904,7 @@
               <h2>Composizione dei corsi</h2>
               <p>Allievi iscritti per percorso</p>
             </div>
-            <a class="btn btn--ghost btn--sm" href="#/admin/students">Gestisci</a>
+            <a class="btn btn--ghost btn--sm" href="#/admin/courses">Gestisci</a>
           </header>
           <div class="grid" style="gap:15px">
             ${state.data.courses
@@ -3630,13 +3633,59 @@
     `;
   }
 
+  function renderAdminCourses() {
+    const courses = state.data.courses.filter(
+      (course) => course.is_active !== false,
+    );
+
+    return `
+      ${pageHeader(
+        "Programmazione",
+        "Corsi",
+        "Definisci periodo, giorno e orario: il calendario delle lezioni si aggiorna automaticamente.",
+        `<button class="btn btn--primary" type="button" data-action="open-course-modal">${icon("plus", 16)} Nuovo corso</button>`,
+      )}
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h3>Percorsi attivi</h3>
+            <p>Ogni programmazione genera e mantiene collegate le lezioni ordinarie nel calendario.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Corso</th><th>Programmazione</th><th>Durata</th><th>Sede</th><th>Iscritti</th><th></th></tr></thead>
+            <tbody>
+              ${
+                courses.length
+                  ? courses
+                      .map((course) => {
+                        const count = state.data.enrollments.filter(
+                          (item) =>
+                            item.course_id === course.id &&
+                            item.is_active !== false,
+                        ).length;
+                        const schedule = courseScheduleConfigured(course)
+                          ? `<strong>${escapeHTML(COURSE_WEEKDAYS[course.weekday] || "—")} · ${escapeHTML(courseTimeRange(course))}</strong><br><span class="subtle">${escapeHTML(formatDate(course.starts_on))}–${escapeHTML(formatDate(course.ends_on))}</span>`
+                          : `<span class="badge badge--warning">Da configurare</span>`;
+                        return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${schedule}</td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
+                      })
+                      .join("")
+                  : `<tr><td colspan="6"><div class="empty-state"><h3>Nessun corso attivo</h3><p>Aggiungi il primo corso per creare il calendario.</p></div></td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   function renderAdminSettings() {
     const settings = state.data.settings || {};
     const tabs = [
       ["school", "Studio"],
       ["rules", "Anno e recuperi"],
       ["payments", "Pagamenti"],
-      ["courses", "Corsi"],
     ];
 
     let content = "";
@@ -3675,7 +3724,7 @@
           <div class="modal__footer" style="margin:22px -21px -21px"><button class="btn btn--primary" type="submit">Salva regole</button></div>
         </form>
       `;
-    } else if (state.settingsTab === "payments") {
+    } else {
       content = `
         <form id="settings-payments-form">
           <div class="setting-section">
@@ -3695,36 +3744,6 @@
           </div>
           <div class="modal__footer" style="margin:22px -21px -21px"><button class="btn btn--primary" type="submit">Salva dati bancari</button></div>
         </form>
-      `;
-    } else {
-      content = `
-        <div class="setting-section">
-          <div class="card-header">
-            <div><h3>Percorsi attivi</h3><p>Ogni programmazione genera e aggiorna automaticamente le lezioni ordinarie nel calendario.</p></div>
-            <button class="btn btn--primary btn--sm" type="button" data-action="open-course-modal">${icon("plus", 14)} Nuovo corso</button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead><tr><th>Corso</th><th>Programmazione</th><th>Durata</th><th>Sede</th><th>Iscritti</th><th></th></tr></thead>
-              <tbody>
-                ${state.data.courses
-                  .filter((course) => course.is_active !== false)
-                  .map((course) => {
-                    const count = state.data.enrollments.filter(
-                      (item) =>
-                        item.course_id === course.id &&
-                        item.is_active !== false,
-                    ).length;
-                    const schedule = courseScheduleConfigured(course)
-                      ? `<strong>${escapeHTML(COURSE_WEEKDAYS[course.weekday] || "—")} · ${escapeHTML(courseTimeRange(course))}</strong><br><span class="subtle">${escapeHTML(formatDate(course.starts_on))}–${escapeHTML(formatDate(course.ends_on))}</span>`
-                      : `<span class="badge badge--warning">Da configurare</span>`;
-                    return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${schedule}</td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
-                  })
-                  .join("")}
-              </tbody>
-            </table>
-          </div>
-        </div>
       `;
     }
 
