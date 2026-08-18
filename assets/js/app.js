@@ -614,6 +614,67 @@
     return `${start}–${end}`;
   }
 
+  const SCHOOL_CLOSURE_TITLE = "Chiusura per festività";
+  const SCHOOL_CLOSURE_FAMILY_NOTE =
+    "La giornata non è conteggiata tra le lezioni, non risulta come assenza e non genera recuperi.";
+
+  function schoolClosureForDate(value) {
+    if (!value || !state.data) return null;
+    const key = /^\d{4}-\d{2}-\d{2}$/.test(String(value))
+      ? String(value)
+      : dateKey(value);
+    return (
+      (state.data.schoolClosures || []).find(
+        (closure) => closure.closure_date === key,
+      ) || null
+    );
+  }
+
+  function lessonIsOnSchoolClosure(lesson) {
+    return Boolean(
+      lesson &&
+        schoolClosureForDate(lesson.occurrence_on || lesson.starts_at),
+    );
+  }
+
+  function schoolClosureDescription(closure) {
+    return String(closure?.description || "").trim();
+  }
+
+  function schoolClosureFamilyDescription(closure) {
+    const description = schoolClosureDescription(closure);
+    return `${description ? `${description}. ` : ""}${SCHOOL_CLOSURE_FAMILY_NOTE}`;
+  }
+
+  function schoolClosuresForStudent(studentId) {
+    if (!state.data || !studentId) return [];
+    const enrollments = enrollmentsForStudent(studentId);
+    return [...(state.data.schoolClosures || [])]
+      .filter((closure) =>
+        enrollments.some((enrollment) => {
+          const course = state.data.courses.find(
+            (item) => item.id === enrollment.course_id,
+          );
+          const closureDate = closure.closure_date;
+          if (
+            (enrollment.starts_on && closureDate < enrollment.starts_on) ||
+            (enrollment.ends_on && closureDate > enrollment.ends_on)
+          ) {
+            return false;
+          }
+          if (!course) return false;
+          if (!courseScheduleConfigured(course)) return true;
+          const closureWeekday = toLocalDate(closureDate).getDay() || 7;
+          return (
+            closureWeekday === Number(course.weekday) &&
+            closureDate >= course.starts_on &&
+            closureDate <= course.ends_on
+          );
+        }),
+      )
+      .sort((a, b) => a.closure_date.localeCompare(b.closure_date));
+  }
+
   function paymentMethodLabel(method) {
     return LABELS.paymentMethod[method] || method || "metodo non indicato";
   }
@@ -888,7 +949,9 @@
     const countableLessonIds = new Set(
       state.data.lessons
         .filter(
-          (lesson) => !String(lesson.status).startsWith("cancelled"),
+          (lesson) =>
+            !String(lesson.status).startsWith("cancelled") &&
+            !lessonIsOnSchoolClosure(lesson),
         )
         .map((lesson) => lesson.id),
     );
@@ -980,7 +1043,7 @@
     window.setTimeout(() => {
       (
         modalRoot.querySelector(
-          ".modal__body input:not([type='hidden']), .modal__body select, .modal__body textarea",
+          ".modal__body input:not([type='hidden']):not([disabled]), .modal__body select:not([disabled]), .modal__body textarea:not([disabled])",
         ) || modalRoot.querySelector(".modal__footer button, .modal__close")
       )?.focus();
     }, 30);
@@ -1021,6 +1084,9 @@
   class DemoStore {
     constructor() {
       this.data = window.QM_DEMO.createDemoData();
+      if (!Array.isArray(this.data.schoolClosures)) {
+        this.data.schoolClosures = [];
+      }
     }
 
     async loadData(role) {
@@ -1542,8 +1608,12 @@
                   lesson.starts_at === startsAt.toISOString() &&
                   !String(lesson.status).startsWith("cancelled"))),
           );
+          const isClosure = this.data.schoolClosures.some(
+            (closure) => closure.closure_date === occurrenceOn,
+          );
           if (
             (!hadManaged || startsAt >= now) &&
+            !isClosure &&
             !alreadyExists
           ) {
             this.data.lessons.push({
@@ -1599,6 +1669,126 @@
       else this.data.courses.push(course);
       const sync = this.syncCourseCalendar(existing || course);
       return { course: existing || course, ...sync };
+    }
+
+    async saveSchoolClosure(closureDate, description) {
+      const normalizedDate = String(closureDate || "");
+      const normalizedDescription = String(description || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+        throw new Error("Indica una data di chiusura valida.");
+      }
+      if (normalizedDate < todayKey()) {
+        throw new Error(
+          "Una chiusura può essere inserita soltanto da oggi in avanti.",
+        );
+      }
+      if (normalizedDescription.length > 120) {
+        throw new Error("La descrizione non può superare 120 caratteri.");
+      }
+
+      const lessonsOnDate = this.data.lessons.filter(
+        (lesson) => dateKey(lesson.starts_at) === normalizedDate,
+      );
+      const protectedLesson = lessonsOnDate.find(
+        (lesson) =>
+          (lesson.origin === "course_schedule" &&
+            lesson.status !== "scheduled") ||
+          (lesson.origin === "manual" && lesson.status === "completed") ||
+          this.data.attendance.some((item) => item.lesson_id === lesson.id) ||
+          this.data.makeupCredits.some(
+            (item) =>
+              item.source_lesson_id === lesson.id ||
+              item.used_lesson_id === lesson.id,
+          ),
+      );
+      if (protectedLesson) {
+        throw new Error(
+          "La data contiene una lezione già gestita, presenze o recuperi collegati e non può diventare una chiusura.",
+        );
+      }
+      const affectedCourses = this.data.courses.filter((course) => {
+        if (course.is_active === false || !courseScheduleConfigured(course)) {
+          return false;
+        }
+        return (
+          normalizedDate >= course.starts_on &&
+          normalizedDate <= course.ends_on &&
+          (toLocalDate(normalizedDate).getDay() || 7) === Number(course.weekday)
+        );
+      });
+      const manualLessons = this.data.lessons.filter(
+        (lesson) =>
+          lesson.origin === "manual" &&
+          dateKey(lesson.starts_at) === normalizedDate &&
+          ["scheduled", "completed"].includes(lesson.status),
+      ).length;
+      if (manualLessons) {
+        throw new Error(
+          "La data contiene appuntamenti manuali programmati o già svolti e non può essere segnata come chiusura.",
+        );
+      }
+      this.data.lessons = this.data.lessons.filter(
+        (lesson) =>
+          !(
+            lesson.origin === "course_schedule" &&
+            lesson.occurrence_on === normalizedDate &&
+            lesson.status === "scheduled"
+          ),
+      );
+      let closure = this.data.schoolClosures.find(
+        (item) => item.closure_date === normalizedDate,
+      );
+      if (closure) {
+        closure.description = normalizedDescription;
+        closure.updated_at = new Date().toISOString();
+      } else {
+        closure = {
+          id: `closure-${Date.now()}`,
+          closure_date: normalizedDate,
+          description: normalizedDescription,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        this.data.schoolClosures.push(closure);
+      }
+      affectedCourses.forEach((course) => this.syncCourseCalendar(course));
+      const protectedLessons = this.data.lessons.filter(
+        (lesson) =>
+          lesson.origin === "course_schedule" &&
+          lesson.occurrence_on === normalizedDate,
+      ).length;
+      return {
+        closure,
+        affected_courses: affectedCourses.length,
+        manual_lessons: manualLessons,
+        protected_lessons: protectedLessons,
+      };
+    }
+
+    async deleteSchoolClosure(closureId) {
+      const index = this.data.schoolClosures.findIndex(
+        (closure) => closure.id === closureId,
+      );
+      if (index < 0) throw new Error("Chiusura non trovata.");
+      const [closure] = this.data.schoolClosures.splice(index, 1);
+      this.data.courses
+        .filter(
+          (course) =>
+            course.is_active !== false &&
+            courseScheduleConfigured(course) &&
+            closure.closure_date >= course.starts_on &&
+            closure.closure_date <= course.ends_on &&
+            (toLocalDate(closure.closure_date).getDay() || 7) ===
+              Number(course.weekday),
+        )
+        .forEach((course) => this.syncCourseCalendar(course));
+      const restoredLessons = this.data.lessons.filter(
+        (lesson) =>
+          lesson.origin === "course_schedule" &&
+          lesson.occurrence_on === closure.closure_date &&
+          lesson.status === "scheduled",
+      ).length;
+      return { closure, restored_lessons: restoredLessons };
     }
 
     async archiveStudent(studentId) {
@@ -2015,6 +2205,7 @@
         courses,
         enrollments,
         lessons,
+        schoolClosures,
         attendance,
         invoices,
         payments,
@@ -2045,6 +2236,9 @@
         ),
         this.query("lessons", "*", (query) =>
           query.order("starts_at", { ascending: true }),
+        ),
+        this.query("school_closures", "*", (query) =>
+          query.order("closure_date", { ascending: true }),
         ),
         this.query("attendance", "*", (query) =>
           query.order("id", { ascending: true }),
@@ -2079,6 +2273,7 @@
         courses,
         enrollments,
         lessons,
+        schoolClosures,
         attendance,
         invoices,
         payments,
@@ -2223,6 +2418,27 @@
       const { data, error } = await this.client.rpc("admin_upsert_course", {
         p_payload: values,
       });
+      if (error) throw error;
+      return data;
+    }
+
+    async saveSchoolClosure(closureDate, description) {
+      const { data, error } = await this.client.rpc(
+        "admin_upsert_school_closure",
+        {
+          p_closure_date: closureDate,
+          p_description: description || null,
+        },
+      );
+      if (error) throw error;
+      return data;
+    }
+
+    async deleteSchoolClosure(closureId) {
+      const { data, error } = await this.client.rpc(
+        "admin_delete_school_closure",
+        { p_closure_id: closureId },
+      );
       if (error) throw error;
       return data;
     }
@@ -2765,11 +2981,13 @@
     const activeStudents = state.data.students.filter(
       (item) => item.is_active !== false,
     );
+    const todayClosure = schoolClosureForDate(todayKey());
     const todayLessons = state.data.lessons
       .filter(
         (item) =>
           dateKey(item.starts_at) === todayKey() &&
-          !String(item.status).startsWith("cancelled"),
+          !String(item.status).startsWith("cancelled") &&
+          !lessonIsOnSchoolClosure(item),
       )
       .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
     const openInvoices = state.data.invoices.filter((item) =>
@@ -2813,7 +3031,7 @@
         "Oggi a Quarto MoVimento",
         `Ciao, ${state.profile?.display_name?.split(" ")[0] || "Valeria"}!`,
         "Ecco cosa succede nei corsi e cosa richiede la tua attenzione.",
-        `<button class="btn btn--primary" type="button" data-action="open-student-modal">${icon("plus", 17)} Nuovo allievo</button>`,
+        `${todayClosure ? `<button class="btn btn--secondary" type="button" data-action="delete-school-closure" data-closure-id="${escapeHTML(todayClosure.id)}">Riapri oggi</button>` : `<button class="btn btn--secondary" type="button" data-action="open-school-closure-modal" data-date="${todayKey()}">${icon("calendar", 16)} Segna chiusura</button>`}<button class="btn btn--primary" type="button" data-action="open-student-modal">${icon("plus", 17)} Nuovo allievo</button>`,
         true,
       )}
 
@@ -2827,7 +3045,11 @@
         ${statCard(
           "Lezioni di oggi",
           todayLessons.length,
-          markedToday ? `${markedToday} presenze già registrate` : "Registro da compilare",
+          todayClosure
+            ? SCHOOL_CLOSURE_TITLE
+            : markedToday
+              ? `${markedToday} presenze già registrate`
+              : "Registro da compilare",
           "calendar",
         )}
         ${statCard(
@@ -2853,7 +3075,14 @@
             </div>
             <a class="btn btn--ghost btn--sm" href="#/admin/attendance">Apri registro ${icon("arrowRight", 14)}</a>
           </header>
-          ${renderScheduleList(todayLessons, "Una giornata libera: non risultano lezioni in calendario.")}
+          ${
+            todayClosure
+              ? `<div class="closure-callout">${icon("calendar", 18)}<p><strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)}</strong>${schoolClosureDescription(todayClosure) ? ` · ${escapeHTML(schoolClosureDescription(todayClosure))}` : ""}. Lo studio resta chiuso e il registro non deve essere compilato.</p></div>`
+              : renderScheduleList(
+                  todayLessons,
+                  "Una giornata libera: non risultano lezioni in calendario.",
+                )
+          }
         </article>
 
         <article class="card">
@@ -3056,13 +3285,17 @@
   }
 
   function renderAdminAttendance() {
-    const lessons = state.data.lessons
+    const closure = schoolClosureForDate(state.attendanceDate);
+    const lessonsOnDate = state.data.lessons
       .filter(
         (item) =>
           dateKey(item.starts_at) === state.attendanceDate &&
           !String(item.status).startsWith("cancelled"),
       )
       .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
+    const lessons = closure
+      ? []
+      : lessonsOnDate.filter((lesson) => !lessonIsOnSchoolClosure(lesson));
     const isToday = state.attendanceDate === todayKey();
 
     return `
@@ -3072,12 +3305,21 @@
           ? "Presenze di oggi"
           : `Presenze del ${formatDate(state.attendanceDate, { day: "numeric", month: "long" })}`,
         "Un tocco per registrare presenza o assenza. Il recupero resta sempre sotto il tuo controllo.",
-        `<label><span class="sr-only">Vai alla data</span><input class="input" id="attendance-date-picker" type="date" value="${escapeHTML(state.attendanceDate)}" aria-label="Vai alla data" style="width:145px" /></label><button class="btn btn--secondary" type="button" data-action="attendance-today">${icon("calendar", 16)} Oggi</button><button class="btn btn--primary" type="button" data-action="open-lesson-modal" data-date="${escapeHTML(state.attendanceDate)}">${icon("plus", 16)} Aggiungi lezione</button>`,
+        `<label><span class="sr-only">Vai alla data</span><input class="input" id="attendance-date-picker" type="date" value="${escapeHTML(state.attendanceDate)}" aria-label="Vai alla data" style="width:145px" /></label><button class="btn btn--secondary" type="button" data-action="attendance-today">${icon("calendar", 16)} Oggi</button>${closure ? `<button class="btn btn--secondary" type="button" data-action="delete-school-closure" data-closure-id="${escapeHTML(closure.id)}">Riapri data</button>` : `<button class="btn btn--secondary" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(state.attendanceDate)}">Segna chiusura</button><button class="btn btn--primary" type="button" data-action="open-lesson-modal" data-date="${escapeHTML(state.attendanceDate)}">${icon("plus", 16)} Aggiungi lezione</button>`}`,
       )}
       ${attendanceDateStrip()}
       <div>
         ${
-          lessons.length
+          closure
+            ? `
+              <article class="card">
+                <div class="closure-callout">
+                  ${icon("calendar", 18)}
+                  <p><strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)}</strong>${schoolClosureDescription(closure) ? ` · ${escapeHTML(schoolClosureDescription(closure))}` : ""}. Non ci sono presenze da registrare.${lessonsOnDate.length ? ` Sono presenti ${lessonsOnDate.length} ${lessonsOnDate.length === 1 ? "appuntamento manuale da verificare" : "appuntamenti manuali da verificare"}.` : ""}</p>
+                </div>
+              </article>
+            `
+            : lessons.length
             ? lessons.map(renderRegister).join("")
             : `
               <article class="card">
@@ -3251,6 +3493,7 @@
 
   function renderAdminCalendar() {
     const dates = calendarGridDates(state.calendarMonth);
+    const selectedClosure = schoolClosureForDate(state.calendarSelectedDate);
     const selectedLessons = state.data.lessons
       .filter(
         (item) => dateKey(item.starts_at) === state.calendarSelectedDate,
@@ -3282,16 +3525,23 @@
             ${dates
               .map((date) => {
                 const key = dateKey(date);
+                const closure = schoolClosureForDate(key);
                 const dayLessons = state.data.lessons
                   .filter((item) => dateKey(item.starts_at) === key)
                   .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
                 const outside =
                   date.getMonth() !== state.calendarMonth.getMonth();
+                const visibleLessonCount = closure ? 2 : 3;
+                const hiddenEntries = Math.max(
+                  0,
+                  dayLessons.length + (closure ? 1 : 0) - 3,
+                );
                 return `
-                  <div class="calendar-day${outside ? " is-outside" : ""}${key === todayKey() ? " is-today" : ""}" data-action="calendar-select-day" data-date="${key}" role="button" tabindex="0" aria-label="Seleziona ${escapeHTML(formatDate(date, { day: "numeric", month: "long", year: "numeric" }))}">
+                  <div class="calendar-day${outside ? " is-outside" : ""}${key === todayKey() ? " is-today" : ""}${closure ? " is-closure" : ""}" data-action="calendar-select-day" data-date="${key}" role="button" tabindex="0" aria-label="Seleziona ${escapeHTML(formatDate(date, { day: "numeric", month: "long", year: "numeric" }))}${closure ? `, ${escapeHTML(SCHOOL_CLOSURE_TITLE)}` : ""}">
                     <span class="calendar-day__number">${date.getDate()}</span>
+                    ${closure ? `<button class="calendar-event is-closure" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(key)}" aria-label="${escapeHTML(`${SCHOOL_CLOSURE_TITLE}, ${formatDate(date, { day: "numeric", month: "long", year: "numeric" })}`)}">${escapeHTML(SCHOOL_CLOSURE_TITLE)}</button>` : ""}
                     ${dayLessons
-                      .slice(0, 3)
+                      .slice(0, visibleLessonCount)
                       .map((lesson) => {
                         const course = courseForLesson(lesson);
                         const isMakeup = ["makeup", "recovery"].includes(
@@ -3300,7 +3550,7 @@
                         return `<button class="calendar-event${isMakeup ? " is-makeup" : ""}" style="border-left-color:${safeColor(course?.color)}" type="button" data-action="view-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${escapeHTML(formatTime(lesson.starts_at))} ${escapeHTML(lesson.title || course?.name || "Lezione")}</button>`;
                       })
                       .join("")}
-                    ${dayLessons.length > 3 ? `<span class="calendar-more">+${dayLessons.length - 3} altre</span>` : ""}
+                    ${hiddenEntries ? `<span class="calendar-more">+${hiddenEntries} ${hiddenEntries === 1 ? "altro" : "altri"}</span>` : ""}
                   </div>
                 `;
               })
@@ -3316,12 +3566,16 @@
             </span>
             <span class="agenda-date__copy">
               <strong>${escapeHTML(formatDate(selected, { month: "long", year: "numeric" }))}</strong>
-              <span>${selectedLessons.length} ${selectedLessons.length === 1 ? "appuntamento" : "appuntamenti"}</span>
+              <span>${selectedClosure ? SCHOOL_CLOSURE_TITLE : `${selectedLessons.length} ${selectedLessons.length === 1 ? "appuntamento" : "appuntamenti"}`}</span>
             </span>
           </div>
           ${
-            selectedLessons.length
-              ? selectedLessons
+            selectedClosure || selectedLessons.length
+              ? `${
+                  selectedClosure
+                    ? `<button class="agenda-item is-closure" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(state.calendarSelectedDate)}" style="width:100%;background:transparent;text-align:left;cursor:pointer"><strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)}</strong><span>${escapeHTML(schoolClosureDescription(selectedClosure) || "Lo studio resta chiuso per l’intera giornata.")}</span></button>`
+                    : ""
+                }${selectedLessons
                   .map((lesson) => {
                     const course = courseForLesson(lesson);
                     return `
@@ -3331,7 +3585,7 @@
                       </button>
                     `;
                   })
-                  .join("")
+                  .join("")}`
               : `
                 <div class="empty-state" style="min-height:150px;padding:20px 0">
                   <span class="empty-state__icon">${icon("calendar", 21)}</span>
@@ -3340,7 +3594,7 @@
                 </div>
               `
           }
-          <button class="btn btn--secondary btn--sm" style="width:100%;margin-top:12px" type="button" data-action="open-lesson-modal" data-date="${state.calendarSelectedDate}">${icon("plus", 14)} Aggiungi qui</button>
+          ${selectedClosure ? `<button class="btn btn--secondary btn--sm" style="width:100%;margin-top:12px" type="button" data-action="delete-school-closure" data-closure-id="${escapeHTML(selectedClosure.id)}">Riapri questa data</button>` : `<button class="btn btn--secondary btn--sm" style="width:100%;margin-top:12px" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(state.calendarSelectedDate)}">${icon("calendar", 14)} Segna chiusura</button><button class="btn btn--secondary btn--sm" style="width:100%;margin-top:8px" type="button" data-action="open-lesson-modal" data-date="${escapeHTML(state.calendarSelectedDate)}">${icon("plus", 14)} Aggiungi qui</button>`}
         </aside>
       </div>
     `;
@@ -3417,7 +3671,8 @@
       (lesson) =>
         ["makeup", "recovery"].includes(lesson.lesson_type) &&
         lesson.status === "scheduled" &&
-        new Date(lesson.starts_at) > new Date(),
+        new Date(lesson.starts_at) > new Date() &&
+        !lessonIsOnSchoolClosure(lesson),
     );
     return `
       ${pageHeader(
@@ -3796,6 +4051,7 @@
     );
     return state.data.lessons
       .filter((lesson) => {
+        if (lessonIsOnSchoolClosure(lesson)) return false;
         if (["makeup", "recovery"].includes(lesson.lesson_type)) {
           return assignedLessonIds.has(lesson.id);
         }
@@ -3884,6 +4140,10 @@
         new Date(lesson.starts_at) >= now &&
         !String(lesson.status).startsWith("cancelled"),
     );
+    const upcomingClosures = schoolClosuresForStudent(student.id).filter(
+      (closure) => closure.closure_date >= todayKey(),
+    );
+    const nextClosure = upcomingClosures[0] || null;
     const futureCancelled = studentLessons.filter(
       (lesson) =>
         new Date(lesson.starts_at) >= now &&
@@ -3919,6 +4179,12 @@
       )}
 
       ${renderFamilyPaymentReminders()}
+
+      ${
+        nextClosure
+          ? `<div class="closure-callout" style="margin-bottom:18px">${icon("calendar", 18)}<p><strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)} · ${escapeHTML(formatDate(nextClosure.closure_date, { weekday: "long", day: "numeric", month: "long" }))}.</strong> ${escapeHTML(schoolClosureFamilyDescription(nextClosure))}</p></div>`
+          : ""
+      }
 
       <section class="grid grid--family">
         <article class="hero-card">
@@ -4016,6 +4282,23 @@
     const upcoming = lessons.filter(
       (item) => new Date(item.starts_at) >= now,
     );
+    const upcomingClosures = student
+      ? schoolClosuresForStudent(student.id).filter(
+          (closure) => closure.closure_date >= todayKey(),
+        )
+      : [];
+    const upcomingEntries = [
+      ...upcoming.map((lesson) => ({
+        kind: "lesson",
+        lesson,
+        sortAt: new Date(lesson.starts_at).getTime(),
+      })),
+      ...upcomingClosures.map((closure) => ({
+        kind: "closure",
+        closure,
+        sortAt: toLocalDate(closure.closure_date).getTime(),
+      })),
+    ].sort((a, b) => a.sortAt - b.sortAt);
     const past = lessons
       .filter((item) => new Date(item.starts_at) < now)
       .reverse()
@@ -4033,12 +4316,26 @@
       <section class="grid grid--family">
         <article class="card">
           <header class="card-header">
-            <div><h2>Prossime lezioni</h2><p>${upcoming.length} appuntamenti in programma</p></div>
+            <div><h2>Prossime date</h2><p>${upcomingEntries.length} ${upcomingEntries.length === 1 ? "voce in calendario" : "voci in calendario"}</p></div>
           </header>
           ${
-            upcoming.length
-              ? `<div class="schedule-list">${upcoming
-                  .map((lesson) => {
+            upcomingEntries.length
+              ? `<div class="schedule-list">${upcomingEntries
+                  .map((entry) => {
+                    if (entry.kind === "closure") {
+                      const closure = entry.closure;
+                      return `
+                        <div class="schedule-item is-closure">
+                          <span class="schedule-time">${escapeHTML(formatDate(closure.closure_date, { day: "numeric", month: "short" }))}</span>
+                          <span class="schedule-line"></span>
+                          <span class="schedule-copy">
+                            <strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)}</strong>
+                            <span>${escapeHTML(schoolClosureFamilyDescription(closure))}</span>
+                          </span>
+                        </div>
+                      `;
+                    }
+                    const lesson = entry.lesson;
                     const course = courseForLesson(lesson);
                     const isMakeup = ["makeup", "recovery"].includes(
                       lesson.lesson_type,
@@ -4118,7 +4415,8 @@
       .filter(
         (item) =>
           item.lesson &&
-          !String(item.lesson.status).startsWith("cancelled"),
+          !String(item.lesson.status).startsWith("cancelled") &&
+          !lessonIsOnSchoolClosure(item.lesson),
       )
       .sort(
         (a, b) =>
@@ -4628,9 +4926,64 @@
     });
   }
 
+  function openSchoolClosureModal(dateValue) {
+    const date = dateValue || state.calendarSelectedDate || todayKey();
+    const closure = schoolClosureForDate(date);
+    if (!closure && date < todayKey()) {
+      toast(
+        "Data non modificabile",
+        "Puoi segnare come chiusura soltanto oggi o una data futura.",
+        "error",
+      );
+      return;
+    }
+    const manualLessons = state.data.lessons.filter(
+      (lesson) =>
+        lesson.origin === "manual" &&
+        dateKey(lesson.starts_at) === date &&
+        ["scheduled", "completed"].includes(lesson.status),
+    ).length;
+    openModal({
+      title: SCHOOL_CLOSURE_TITLE,
+      subtitle: closure
+        ? `Chiusura del ${formatDate(date)}`
+        : "Segna una giornata in cui lo studio resta chiuso.",
+      className: "modal--sm",
+      body: `
+        <form id="school-closure-form">
+          <input type="hidden" name="closure_date" value="${escapeHTML(date)}" />
+          <div class="form-grid">
+            <div class="field field--full">
+              <label for="school-closure-date">Data</label>
+              <input class="input" id="school-closure-date" type="date" value="${escapeHTML(date)}" disabled />
+            </div>
+            <div class="field field--full">
+              <label for="school-closure-description">Descrizione facoltativa</label>
+              <input class="input" id="school-closure-description" name="description" maxlength="120" value="${escapeHTML(schoolClosureDescription(closure))}" placeholder="Es. Festa patronale" />
+              <p class="field-hint">Nel calendario comparirà sempre “${escapeHTML(SCHOOL_CLOSURE_TITLE)}”.</p>
+            </div>
+          </div>
+          <div class="closure-callout" style="margin-top:16px">
+            ${icon("calendar", 18)}
+            <p>${manualLessons ? `Ci sono ${manualLessons} ${manualLessons === 1 ? "appuntamento manuale programmato o già svolto" : "appuntamenti manuali programmati o già svolti"} in questa data. Finché sono presenti, la data non può essere segnata come chiusura.` : "Le lezioni ordinarie collegate ai corsi vengono tolte da questa data, non vengono conteggiate e non generano recuperi. Tornano automaticamente se la riapri."}</p>
+          </div>
+        </form>
+      `,
+      footer: `${closure ? `<button class="btn btn--danger" type="button" data-action="delete-school-closure" data-closure-id="${escapeHTML(closure.id)}">Riapri questa data</button>` : ""}<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="school-closure-form"${manualLessons && !closure ? " disabled" : ""}>${closure ? "Salva nota" : "Segna chiusura"}</button>`,
+    });
+  }
+
   function openLessonModal(dateValue, defaults) {
     const options = defaults || {};
     const date = dateValue || state.calendarSelectedDate || todayKey();
+    if (schoolClosureForDate(date)) {
+      toast(
+        SCHOOL_CLOSURE_TITLE,
+        "Riapri prima questa data per aggiungere una lezione.",
+        "error",
+      );
+      return;
+    }
     const defaultCourse =
       state.data.courses.find((item) => item.id === options.courseId) ||
       state.data.courses.find((item) => item.is_active !== false);
@@ -4682,6 +5035,7 @@
           ["makeup", "recovery"].includes(lesson.lesson_type) &&
           lesson.status === "scheduled" &&
           new Date(lesson.starts_at) > new Date() &&
+          !lessonIsOnSchoolClosure(lesson) &&
           (!credit.expires_on ||
             dateKey(lesson.starts_at) <= credit.expires_on),
       )
@@ -4782,7 +5136,6 @@
             <label for="cancel-lesson-status">Motivo</label>
             <select class="select" id="cancel-lesson-status" name="status" required>
               <option value="cancelled_teacher">Annullata dall’insegnante</option>
-              <option value="cancelled_holiday">Festività o chiusura</option>
               <option value="cancelled_other">Altro motivo</option>
             </select>
           </div>
@@ -5239,6 +5592,9 @@
 
   async function refreshData(render) {
     state.data = await state.store.loadData(state.role);
+    if (!Array.isArray(state.data.schoolClosures)) {
+      state.data.schoolClosures = [];
+    }
     state.lastDataRefreshAt = Date.now();
     if (
       state.selectedStudentId &&
@@ -5791,13 +6147,21 @@
       .replace(/\.\d{3}Z$/, "Z");
   }
 
+  function icsDateOnly(value) {
+    return String(value || "").replaceAll("-", "");
+  }
+
   function downloadStudentCalendar(studentId) {
     const student = state.data.students.find((item) => item.id === studentId);
     if (!student) return;
     const events = lessonsForStudent(studentId).filter(
       (item) =>
         new Date(item.ends_at) >= new Date() &&
-        !String(item.status).startsWith("cancelled"),
+        !String(item.status).startsWith("cancelled") &&
+        !lessonIsOnSchoolClosure(item),
+    );
+    const closures = schoolClosuresForStudent(studentId).filter(
+      (closure) => closure.closure_date >= todayKey(),
     );
     const lines = [
       "BEGIN:VCALENDAR",
@@ -5821,6 +6185,17 @@
           "END:VEVENT",
         ];
       }),
+      ...closures.flatMap((closure) => [
+        "BEGIN:VEVENT",
+        `UID:school-closure-${escapeIcs(closure.id)}@quartomovimento.it`,
+        `DTSTAMP:${icsDate(new Date())}`,
+        `DTSTART;VALUE=DATE:${icsDateOnly(closure.closure_date)}`,
+        `DTEND;VALUE=DATE:${icsDateOnly(dateKey(addDays(closure.closure_date, 1)))}`,
+        `SUMMARY:${escapeIcs(SCHOOL_CLOSURE_TITLE)}`,
+        `DESCRIPTION:${escapeIcs(schoolClosureFamilyDescription(closure))}`,
+        "TRANSP:TRANSPARENT",
+        "END:VEVENT",
+      ]),
       "END:VCALENDAR",
     ];
     const blob = new Blob([lines.join("\r\n")], {
@@ -5836,7 +6211,7 @@
     URL.revokeObjectURL(url);
     toast(
       "Calendario scaricato",
-      "Apri il file .ics per aggiungere le lezioni al tuo calendario.",
+      "Apri il file .ics per aggiungere lezioni e chiusure al tuo calendario.",
     );
   }
 
@@ -6020,6 +6395,40 @@
     }
   }
 
+  async function handleDeleteSchoolClosureAction(actionTarget) {
+    const closure = (state.data.schoolClosures || []).find(
+      (item) => item.id === actionTarget.dataset.closureId,
+    );
+    if (!closure) return;
+    if (
+      !window.confirm(
+        `Riaprire il ${formatDate(closure.closure_date)}? Le lezioni ordinarie previste dai corsi torneranno automaticamente nel calendario.`,
+      )
+    ) {
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Riapertura…");
+    try {
+      const result = await state.store.deleteSchoolClosure(closure.id);
+      closeModal();
+      await refreshData();
+      const restored = Number(result?.restored_lessons || 0);
+      toast(
+        "Data riaperta",
+        restored
+          ? `${restored} ${restored === 1 ? "lezione è tornata" : "lezioni sono tornate"} nel calendario.`
+          : "La chiusura è stata rimossa dal calendario.",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast(
+        "Data non riaperta",
+        error.message || "Riprova tra poco.",
+        "error",
+      );
+    }
+  }
+
   appRoot.addEventListener("click", async (event) => {
     const actionTarget = event.target.closest("[data-action]");
     if (!actionTarget) return;
@@ -6063,6 +6472,10 @@
         courseId: actionTarget.dataset.courseId,
         lessonType: actionTarget.dataset.lessonType,
       });
+    } else if (action === "open-school-closure-modal") {
+      openSchoolClosureModal(actionTarget.dataset.date);
+    } else if (action === "delete-school-closure") {
+      await handleDeleteSchoolClosureAction(actionTarget);
     } else if (action === "view-lesson") {
       openLessonDetails(actionTarget.dataset.lessonId);
     } else if (action === "edit-lesson") {
@@ -6101,6 +6514,15 @@
       const lessonId = actionTarget.dataset.lessonId;
       const studentId = actionTarget.dataset.studentId;
       const status = actionTarget.dataset.status;
+      const lesson = state.data.lessons.find((item) => item.id === lessonId);
+      if (lessonIsOnSchoolClosure(lesson)) {
+        toast(
+          SCHOOL_CLOSURE_TITLE,
+          "Non si possono registrare presenze in una giornata di chiusura.",
+          "error",
+        );
+        return;
+      }
       if (status === "absent_excused") {
         openExcusedAbsenceModal(lessonId, studentId);
         return;
@@ -6250,6 +6672,10 @@
     const action = actionTarget.dataset.action;
     if (action === "close-modal") {
       closeModal();
+    } else if (action === "open-school-closure-modal") {
+      openSchoolClosureModal(actionTarget.dataset.date);
+    } else if (action === "delete-school-closure") {
+      await handleDeleteSchoolClosureAction(actionTarget);
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "delete-student") {
@@ -6457,7 +6883,39 @@
             ? "Le modifiche sono state salvate."
             : "I dati sono salvati. Genera il link di invito dalla scheda dell’allievo.",
         );
+      } else if (formId === "school-closure-form") {
+        const closureDate = String(values.closure_date || "");
+        const description = String(values.description || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(closureDate)) {
+          throw new Error("Indica una data di chiusura valida.");
+        }
+        if (description.length > 120) {
+          throw new Error("La descrizione non può superare 120 caratteri.");
+        }
+        const result = await state.store.saveSchoolClosure(
+          closureDate,
+          description,
+        );
+        state.calendarMonth = startOfMonth(toLocalDate(closureDate));
+        state.calendarSelectedDate = closureDate;
+        closeModal();
+        await refreshData();
+        const manualLessons = Number(result?.manual_lessons || 0);
+        const affectedCourses = Number(result?.affected_courses || 0);
+        toast(
+          "Chiusura salvata",
+          manualLessons
+            ? `${manualLessons} ${manualLessons === 1 ? "appuntamento manuale resta" : "appuntamenti manuali restano"} da verificare in questa data.`
+            : affectedCourses
+              ? `Il calendario di ${affectedCourses} ${affectedCourses === 1 ? "corso è stato aggiornato" : "corsi è stato aggiornato"}.`
+              : "La chiusura è ora visibile nel calendario.",
+        );
       } else if (formId === "lesson-form") {
+        if (schoolClosureForDate(values.date)) {
+          throw new Error(
+            "La data è segnata come chiusura. Riaprila prima di aggiungere una lezione.",
+          );
+        }
         const start = romeDateTime(values.date, values.time);
         if (Number.isNaN(start.getTime())) {
           throw new Error("Data o ora della lezione non valida.");
@@ -6480,6 +6938,11 @@
           "La data è ora nel calendario. Le serie ordinarie restano collegate al corso.",
         );
       } else if (formId === "edit-lesson-form") {
+        if (schoolClosureForDate(values.date)) {
+          throw new Error(
+            "La data è segnata come chiusura. Scegli un’altra giornata.",
+          );
+        }
         const start = romeDateTime(values.date, values.time);
         if (Number.isNaN(start.getTime())) {
           throw new Error("Data o ora della lezione non valida.");
@@ -6537,6 +7000,14 @@
             : "Il corso è salvato senza una programmazione settimanale fissa.",
         );
       } else if (formId === "assign-makeup-form") {
+        const targetLesson = state.data.lessons.find(
+          (lesson) => lesson.id === values.lesson_id,
+        );
+        if (lessonIsOnSchoolClosure(targetLesson)) {
+          throw new Error(
+            "La sessione scelta cade in una giornata di chiusura.",
+          );
+        }
         await state.store.assignMakeup(values.credit_id, values.lesson_id);
         closeModal();
         await refreshData();

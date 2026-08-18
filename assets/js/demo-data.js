@@ -254,6 +254,18 @@
       },
     ];
 
+    const schoolClosures = [
+      {
+        id: "closure-1",
+        closure_date: isoDay(7),
+        description: "",
+        created_at: new Date().toISOString(),
+      },
+    ];
+    const schoolClosureDates = new Set(
+      schoolClosures.map((closure) => closure.closure_date),
+    );
+
     const lessonSpecs = [
       ["lesson-1", "course-1", -21, 16, 30, "regular", "completed"],
       ["lesson-2", "course-3", -19, 17, 30, "regular", "completed"],
@@ -281,8 +293,9 @@
       ["lesson-24", "course-2", 16, 16, 30, "regular", "scheduled"],
     ];
 
-    const lessons = lessonSpecs.map(
-      ([id, courseId, day, hour, minute, lessonType, status]) => {
+    const lessons = lessonSpecs
+      .filter(([, , day]) => !schoolClosureDates.has(isoDay(day)))
+      .map(([id, courseId, day, hour, minute, lessonType, status]) => {
         const course = courses.find((item) => item.id === courseId);
         const startsAt = localDate(day, hour, minute);
         const endsAt = new Date(
@@ -301,8 +314,7 @@
           origin: lessonType === "regular" ? "course_schedule" : "manual",
           occurrence_on: lessonType === "regular" ? isoDay(day) : null,
         };
-      },
-    );
+      });
 
     const attendance = [
       ["att-1", "lesson-1", "stu-1", "present"],
@@ -517,6 +529,7 @@
       students,
       courses,
       enrollments,
+      schoolClosures,
       lessons,
       attendance,
       invoices,

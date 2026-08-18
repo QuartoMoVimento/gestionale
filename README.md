@@ -28,6 +28,8 @@ Area amministrativa:
   accessi e-mail per lo stesso nucleo;
 - corsi con periodo, giorno e ora settimanale collegati automaticamente al
   calendario, oltre a lezioni singole e recuperi;
+- date di **chiusura per festività** che rimuovono dal calendario le lezioni
+  ordinarie senza generare assenze o recuperi;
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
@@ -36,7 +38,7 @@ Area amministrativa:
 
 Area famiglia:
 
-- calendario delle lezioni;
+- calendario delle lezioni e delle chiusure per festività;
 - riepilogo di presenze, assenze e recuperi;
 - scadenze e pagamenti della propria famiglia;
 - promemoria di pagamento inviati dall'amministratrice, in sola lettura;
@@ -149,7 +151,12 @@ creazione degli accessi: deduplica i nuclei per e-mail, conserva gli indirizzi
 famiglia senza creare utenti Auth e abilita la generazione manuale dei link.
 `014` rende invece ogni corso la fonte della propria programmazione
 settimanale: aggiunge inizio, fine, giorno e ora, genera le lezioni ordinarie e
-riconcilia automaticamente quelle future quando il corso cambia.
+riconcilia automaticamente quelle future quando il corso cambia. `015`
+aggiunge le chiusure per festività come date autonome, visibili anche alle
+famiglie: le occorrenze ordinarie interessate vengono escluse senza presenze,
+crediti di recupero o modifica delle altre lezioni. `016` converte nello stesso
+formato le festività future che erano già state registrate annullando singole
+lezioni.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
@@ -191,6 +198,24 @@ La migrazione `014` importa inizialmente anche i corsi ricorrenti già presenti:
 ricava giorno e ora dal loro nome e usa il periodo didattico configurato nelle
 impostazioni. Va applicata al database prima di pubblicare il frontend che usa
 la nuova funzione RPC.
+
+### Chiusure per festività
+
+Dal **Calendario** amministrativo si può indicare una data odierna o futura
+come **Chiusura per festività**. La funzione database
+`admin_upsert_school_closure` rimuove soltanto le occorrenze ordinarie generate
+dai corsi in quella data; non registra assenze, non crea recuperi e non cambia
+gli identificativi delle altre lezioni. Se la data contiene già una lezione
+svolta, un appuntamento manuale ancora programmato, una presenza o un recupero
+collegato, l'operazione viene rifiutata per proteggere lo storico: la data
+manuale va prima spostata o annullata.
+
+La chiusura compare nel calendario e nella dashboard delle famiglie per le
+quali avrebbe sostituito una lezione. Eliminandola, il database ricrea soltanto
+le occorrenze ancora compatibili con la programmazione corrente dei corsi. Le
+chiusure sono leggibili dagli utenti autenticati, ma possono essere create o
+rimosse esclusivamente dall'amministratrice tramite le RPC della migrazione
+`015`.
 
 ## Configurazione Auth
 

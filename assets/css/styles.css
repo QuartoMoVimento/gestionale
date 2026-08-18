@@ -1541,6 +1541,35 @@ h4 {
   border-top: 1px solid var(--line);
 }
 
+.schedule-item.is-closure {
+  margin: 4px 0;
+  padding-right: 12px;
+  padding-left: 12px;
+  border: 1px solid rgba(102, 112, 124, 0.16);
+  border-radius: 12px;
+  background: #f4f6f7;
+}
+
+.schedule-item.is-closure + .schedule-item,
+.schedule-item + .schedule-item.is-closure {
+  border-top-color: rgba(102, 112, 124, 0.16);
+}
+
+.schedule-item.is-closure .schedule-line {
+  background: #7d8994;
+}
+
+.schedule-item.is-closure .schedule-copy strong {
+  color: #4d5964;
+}
+
+.schedule-item.is-closure .schedule-copy span {
+  overflow: visible;
+  line-height: 1.45;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .schedule-time {
   font-size: 13px;
   font-weight: 900;
@@ -2178,6 +2207,11 @@ h4 {
   background: #f2fbfb;
 }
 
+.calendar-day.is-closure,
+.calendar-day.is-closure.is-today {
+  background: #f3f5f6;
+}
+
 .calendar-day__number {
   display: grid;
   width: 25px;
@@ -2215,6 +2249,13 @@ h4 {
 .calendar-event.is-makeup {
   border-left-color: var(--brand-orange);
   background: var(--brand-orange-soft);
+}
+
+.calendar-event.is-closure {
+  border-left-color: #7d8994;
+  color: #4d5964;
+  background: #e7ebed;
+  cursor: pointer;
 }
 
 .calendar-more {
@@ -2313,6 +2354,15 @@ h4 {
   margin-top: 2px;
   color: var(--ink-soft);
   font-size: 10px;
+}
+
+.agenda-item.is-closure::before {
+  background: #7d8994;
+  box-shadow: 0 0 0 2px #7d8994;
+}
+
+.agenda-item.is-closure strong {
+  color: #4d5964;
 }
 
 /* Payments and family pages */
@@ -2566,6 +2616,27 @@ h4 {
 }
 
 .info-callout p {
+  margin: 0;
+}
+
+.closure-callout {
+  display: flex;
+  padding: 14px;
+  border: 1px solid rgba(102, 112, 124, 0.18);
+  border-radius: 15px;
+  gap: 11px;
+  color: #4d5964;
+  background: #f3f5f6;
+  font-size: 11px;
+}
+
+.closure-callout svg {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+}
+
+.closure-callout p {
   margin: 0;
 }
 
@@ -3169,6 +3240,10 @@ h4 {
 
   .calendar-event.is-makeup {
     background: var(--brand-orange);
+  }
+
+  .calendar-event.is-closure {
+    background: #7d8994;
   }
 
   .calendar-day__number {
