@@ -416,21 +416,6 @@
       },
     ];
 
-    const bankTransferNotices = [
-      {
-        id: "notice-1",
-        invoice_id: "inv-4",
-        family_id: "fam-3",
-        amount_cents: 31000,
-        transfer_date: isoDay(-1),
-        reference: "TRN-DEMO-310",
-        note: "",
-        status: "submitted",
-        review_note: null,
-        created_at: isoTime(-1, 17, 45),
-      },
-    ];
-
     const makeupCredits = [
       {
         id: "makeup-1",
@@ -464,18 +449,6 @@
       },
     ];
 
-    const familyNotifications = [
-      {
-        id: "family-notification-1",
-        family_id: "fam-1",
-        student_id: "stu-1",
-        kind: "schedule",
-        message: "Possiamo verificare insieme l’orario della prossima lezione?",
-        status: "unread",
-        created_at: isoTime(-1, 19, 15),
-      },
-    ];
-
     return {
       families,
       familyUsers,
@@ -486,9 +459,8 @@
       attendance,
       invoices,
       payments,
-      bankTransferNotices,
+      bankTransferNotices: [],
       makeupCredits,
-      familyNotifications,
       settings: {
         school_name: "Studio Quarto MoVimento",
         school_address: "Via di Novecchio, 10 · Pisa",

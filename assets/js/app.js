@@ -61,9 +61,7 @@
       paymentStatus: "all",
     },
     settingsTab: "school",
-    notificationLimit: 8,
     authListener: null,
-    notificationsChannel: null,
     authFingerprint: null,
     lastDataRefreshAt: 0,
   };
@@ -315,10 +313,6 @@
       .join("");
   }
 
-  function normalizePhone(value) {
-    return String(value || "").replace(/[^\d+]/g, "");
-  }
-
   function normalizeEmailList(value) {
     const source = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
     return [...new Set(source
@@ -328,11 +322,6 @@
 
   function isValidEmail(value) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || ""));
-  }
-
-  function whatsappNumber(value) {
-    const digits = normalizePhone(value).replace(/^\+/, "");
-    return digits.startsWith("39") ? digits : `39${digits}`;
   }
 
   function safeColor(value, fallback) {
@@ -440,28 +429,11 @@
     return credit?.status;
   }
 
-  function supportEmail() {
-    return (
-      state.data?.settings?.support_email ||
-      config.supportEmail ||
-      "valeria@quartomovimento.it"
-    );
-  }
-
-  function supportPhone() {
-    return (
-      state.data?.settings?.support_phone ||
-      config.supportPhone ||
-      "3277749860"
-    );
-  }
-
-  function supportActions(includeNotification) {
+  function supportActions() {
     return `
       <div class="support-actions">
         <a class="btn btn--secondary btn--sm" href="${WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${icon("help", 15)} Parlane con Valeria</a>
         <a class="btn btn--secondary btn--sm" href="${TIDYCAL_URL}" target="_blank" rel="noopener noreferrer">${icon("calendar", 15)} Fissa un colloquio</a>
-        ${includeNotification ? `<button class="btn btn--primary btn--sm" type="button" data-action="open-family-notification">${icon("bell", 15)} Invia una notifica</button>` : ""}
       </div>
     `;
   }
@@ -489,7 +461,7 @@
       overdue: "Scaduto",
       cancelled: "Annullato",
       partially_paid: "Parziale",
-      processing: "In verifica",
+      processing: "In elaborazione",
       void: "Annullata",
       refunded: "Rimborsata",
     },
@@ -521,13 +493,6 @@
       bank_transfer: "bonifico",
       cash: "contanti",
       other: "altro",
-    },
-    notificationKind: {
-      general: "Comunicazione",
-      absence: "Assenza",
-      schedule: "Lezioni e orari",
-      makeup: "Recupero",
-      payment: "Pagamento",
     },
   };
 
@@ -949,9 +914,6 @@
         copy.makeupCredits = copy.makeupCredits.filter((item) =>
           studentIds.includes(item.student_id),
         );
-        copy.familyNotifications = (copy.familyNotifications || []).filter(
-          (item) => item.family_id === familyId,
-        );
       }
       return copy;
     }
@@ -1364,31 +1326,6 @@
       });
     }
 
-    async submitFamilyNotification(payload) {
-      const notification = {
-        id: `notification-${Date.now()}`,
-        family_id: payload.family_id,
-        student_id: payload.student_id || null,
-        kind: payload.kind || "general",
-        message: payload.message,
-        status: "unread",
-        created_at: new Date().toISOString(),
-      };
-      this.data.familyNotifications = this.data.familyNotifications || [];
-      this.data.familyNotifications.unshift(notification);
-      return notification;
-    }
-
-    async updateFamilyNotification(notificationId, status) {
-      const notification = (this.data.familyNotifications || []).find(
-        (item) => item.id === notificationId,
-      );
-      if (!notification) throw new Error("Notifica non trovata.");
-      notification.status = status;
-      notification.read_at = status === "unread" ? null : new Date().toISOString();
-      return notification;
-    }
-
     async saveInvoice(payload) {
       const invoice = {
         id: `inv-${Date.now()}`,
@@ -1523,86 +1460,6 @@
       return payment;
     }
 
-    async submitBankNotice(payload) {
-      const invoice = this.data.invoices.find(
-        (item) => item.id === payload.invoiceId,
-      );
-      if (!invoice) throw new Error("Scadenza non trovata.");
-      if (
-        this.data.bankTransferNotices.some(
-          (item) =>
-            item.invoice_id === invoice.id && item.status === "submitted",
-        )
-      ) {
-        throw new Error("Hai già segnalato un bonifico per questa scadenza.");
-      }
-      this.data.bankTransferNotices.push({
-        id: `notice-${Date.now()}`,
-        invoice_id: invoice.id,
-        family_id: invoice.family_id,
-        amount_cents: invoiceOutstandingCents(invoice),
-        transfer_date: payload.transferDate,
-        reference: payload.reference || null,
-        note: "",
-        status: "submitted",
-        review_note: null,
-        created_at: new Date().toISOString(),
-      });
-      invoice.status = "processing";
-    }
-
-    async confirmBankTransfer(noticeId, reviewNote) {
-      const notice = this.data.bankTransferNotices.find(
-        (item) => item.id === noticeId,
-      );
-      if (!notice || notice.status !== "submitted") {
-        throw new Error("Segnalazione non trovata o già esaminata.");
-      }
-      notice.status = "verified";
-      notice.review_note = reviewNote || null;
-      notice.reviewed_at = new Date().toISOString();
-      const invoice = this.data.invoices.find(
-        (item) => item.id === notice.invoice_id,
-      );
-      if (!invoice) throw new Error("Scadenza non trovata.");
-      const outstandingBefore = invoiceOutstandingCents(invoice);
-      this.data.payments.push({
-        id: `pay-${Date.now()}`,
-        invoice_id: invoice.id,
-        family_id: invoice.family_id,
-        amount_cents: notice.amount_cents,
-        refunded_cents: 0,
-        currency: invoice.currency || "EUR",
-        method: "bank_transfer",
-        status: "completed",
-        provider: "manual",
-        reference: notice.reference || `Bonifico ${notice.transfer_date}`,
-        paid_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      });
-      invoice.status =
-        notice.amount_cents >= outstandingBefore ? "paid" : "partially_paid";
-      invoice.payment_method = "bank_transfer";
-      invoice.paid_at =
-        invoice.status === "paid" ? new Date().toISOString() : null;
-    }
-
-    async rejectBankTransfer(noticeId, reviewNote) {
-      const notice = this.data.bankTransferNotices.find(
-        (item) => item.id === noticeId,
-      );
-      if (!notice || notice.status !== "submitted") {
-        throw new Error("Segnalazione non trovata o già esaminata.");
-      }
-      notice.status = "rejected";
-      notice.review_note = reviewNote;
-      notice.reviewed_at = new Date().toISOString();
-      const invoice = this.data.invoices.find(
-        (item) => item.id === notice.invoice_id,
-      );
-      if (invoice) invoice.status = "pending";
-    }
-
     async assignMakeup(creditId, lessonId) {
       const credit = this.data.makeupCredits.find(
         (item) => item.id === creditId,
@@ -1705,7 +1562,6 @@
         payments,
         bankTransferNotices,
         makeupCredits,
-        familyNotifications,
         settingRows,
       ] = await Promise.all([
         this.query("families", "*", (query) =>
@@ -1745,9 +1601,6 @@
         this.query("makeup_credits", "*", (query) =>
           query.order("created_at", { ascending: false }),
         ),
-        this.query("family_notifications", "*", (query) =>
-          query.order("created_at", { ascending: false }),
-        ),
         this.query("app_settings", "key,value"),
       ]);
       const settings = Object.fromEntries(
@@ -1768,7 +1621,6 @@
         payments,
         bankTransferNotices,
         makeupCredits,
-        familyNotifications,
         settings,
       };
     }
@@ -1967,33 +1819,6 @@
       return data;
     }
 
-    async submitFamilyNotification(payload) {
-      const { data, error } = await this.client
-        .from("family_notifications")
-        .insert({
-          family_id: payload.family_id,
-          student_id: payload.student_id || null,
-          kind: payload.kind || "general",
-          message: payload.message,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
-    }
-
-    async updateFamilyNotification(notificationId, status) {
-      const { data, error } = await this.client.rpc(
-        "admin_update_family_notification_status",
-        {
-          p_notification_id: notificationId,
-          p_status: status,
-        },
-      );
-      if (error) throw error;
-      return data;
-    }
-
     async saveInvoice(payload) {
       const values = {
         family_id: payload.family_id,
@@ -2052,40 +1877,6 @@
           p_reason: reason,
         },
       );
-      if (error) throw error;
-      return data;
-    }
-
-    async submitBankNotice(payload) {
-      const invoice = state.data.invoices.find(
-        (item) => item.id === payload.invoiceId,
-      );
-      if (!invoice) throw new Error("Scadenza non trovata.");
-      const { error } = await this.client.from("bank_transfer_notices").insert({
-        invoice_id: payload.invoiceId,
-        family_id: invoice.family_id,
-        amount_cents: invoiceOutstandingCents(invoice),
-        transfer_date: payload.transferDate,
-        reference: payload.reference || null,
-        status: "submitted",
-      });
-      if (error) throw error;
-    }
-
-    async confirmBankTransfer(noticeId, reviewNote) {
-      const { data, error } = await this.client.rpc("confirm_bank_transfer", {
-        p_notice_id: noticeId,
-        p_review_note: reviewNote || null,
-      });
-      if (error) throw error;
-      return data;
-    }
-
-    async rejectBankTransfer(noticeId, reviewNote) {
-      const { data, error } = await this.client.rpc("reject_bank_transfer", {
-        p_notice_id: noticeId,
-        p_review_note: reviewNote,
-      });
       if (error) throw error;
       return data;
     }
@@ -2196,9 +1987,8 @@
             <p class="login-helper">
               Il profilo riconosce automaticamente se sei amministratrice o famiglia.
               <button class="copy-button" type="button" data-action="forgot-password">Password dimenticata?</button>
-              Per assistenza scrivi a <a href="mailto:${escapeHTML(config.supportEmail || "valeria@quartomovimento.it")}">${escapeHTML(config.supportEmail || "valeria@quartomovimento.it")}</a>.
             </p>
-            ${supportActions(false)}
+            ${supportActions()}
             ${
               state.mode === "demo"
                 ? `
@@ -2263,11 +2053,8 @@
     const overdue = state.data.invoices.filter(
       (item) => invoiceEffectiveStatus(item) === "overdue",
     ).length;
-    const unreadNotifications = (state.data.familyNotifications || []).filter(
-      (item) => item.status === "unread",
-    ).length;
     return [
-      ["overview", "Riepilogo", "home", unreadNotifications || null],
+      ["overview", "Riepilogo", "home", null],
       ["attendance", "Presenze", "check", null],
       ["students", "Allievi", "users", null],
       ["calendar", "Calendario", "calendar", null],
@@ -2334,7 +2121,7 @@
                   <div class="sidebar-help">
                    <strong>Serve una mano?</strong>
                    <p>Per assenze, cambi orario o dubbi scrivimi direttamente.</p>
-                    ${supportActions(false)}
+                    ${supportActions()}
                   </div>
                 `
                 : ""
@@ -2359,12 +2146,7 @@
             </div>
             <div class="topbar-actions">
               <span class="topbar-date">${escapeHTML(formatLongDate(new Date()))}</span>
-              ${
-                state.role === ROLE_ADMIN
-                  ? `<a class="btn btn--secondary btn--icon has-notification" href="#/admin/overview" aria-label="${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length ? `${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length} notifiche da leggere` : "Nessuna notifica da leggere"}">${icon("bell", 18)}${(state.data.familyNotifications || []).filter((item) => item.status === "unread").length ? `<span class="notification-count">${Math.min(99, (state.data.familyNotifications || []).filter((item) => item.status === "unread").length)}</span>` : ""}</a><a class="btn btn--secondary btn--icon" href="#/admin/settings" aria-label="Impostazioni">${icon("settings", 18)}</a>`
-                  : ""
-              }
-              ${state.role === ROLE_FAMILY ? `<a class="btn btn--secondary btn--icon" href="mailto:${escapeHTML(supportEmail())}" aria-label="Contatta Quarto MoVimento">${icon("mail", 18)}</a>` : ""}
+              ${state.role === ROLE_ADMIN ? `<a class="btn btn--secondary btn--icon" href="#/admin/settings" aria-label="Impostazioni">${icon("settings", 18)}</a>` : ""}
               <button class="btn btn--secondary btn--icon" type="button" data-action="logout" aria-label="Esci">${icon("logout", 18)}</button>
             </div>
           </header>
@@ -2480,63 +2262,6 @@
     `;
   }
 
-  function renderAdminNotifications() {
-    const notifications = (state.data.familyNotifications || [])
-      .filter((item) => item.status !== "resolved")
-      .sort(
-        (a, b) =>
-          new Date(b.created_at || 0) - new Date(a.created_at || 0),
-      );
-    const unread = notifications.filter((item) => item.status === "unread");
-    return `
-      <section class="card" style="margin-top:18px">
-        <header class="card-header">
-          <div>
-            <h2>Notifiche dalle famiglie</h2>
-            <p>${unread.length ? `${unread.length} ${unread.length === 1 ? "messaggio da leggere" : "messaggi da leggere"}` : "Nessun nuovo messaggio"}</p>
-          </div>
-          ${unread.length ? `<span class="badge badge--warning">${unread.length} nuove</span>` : ""}
-        </header>
-        ${
-          notifications.length
-            ? `<div class="notification-list">${notifications
-                .slice(0, state.notificationLimit)
-                .map((notification) => {
-                  const family = state.data.families.find(
-                    (item) => item.id === notification.family_id,
-                  );
-                  const student = state.data.students.find(
-                    (item) => item.id === notification.student_id,
-                  );
-                  const isUnread = notification.status === "unread";
-                  return `
-                    <article class="notification-item${isUnread ? " is-unread" : ""}">
-                      <span class="notification-dot" aria-hidden="true"></span>
-                      <span class="notification-item__copy">
-                        <strong>${escapeHTML(family?.guardian_name || family?.display_name || "Famiglia")}${student ? ` · ${escapeHTML(fullName(student))}` : ""}</strong>
-                        <span>${escapeHTML(LABELS.notificationKind[notification.kind] || "Comunicazione")} · ${escapeHTML(formatDate(notification.created_at, { day: "numeric", month: "short", year: "numeric" }))} alle ${escapeHTML(formatTime(notification.created_at))}</span>
-                        <p>${escapeHTML(notification.message)}</p>
-                      </span>
-                      <span class="notification-item__actions">
-                        ${isUnread ? `<button class="btn btn--secondary btn--sm" type="button" data-action="update-family-notification" data-notification-id="${escapeHTML(notification.id)}" data-status="read">Segna letta</button>` : ""}
-                        <button class="btn btn--ghost btn--sm" type="button" data-action="update-family-notification" data-notification-id="${escapeHTML(notification.id)}" data-status="resolved">Risolta</button>
-                      </span>
-                    </article>
-                  `;
-                })
-                .join("")}</div>${
-                  notifications.length > state.notificationLimit
-                    ? `<div class="notification-list__more"><button class="btn btn--secondary btn--sm" type="button" data-action="show-more-notifications">Mostra altre notifiche (${notifications.length - state.notificationLimit})</button></div>`
-                    : notifications.length > 8 && state.notificationLimit > 8
-                      ? `<div class="notification-list__more"><button class="btn btn--ghost btn--sm" type="button" data-action="collapse-notifications">Mostra meno</button></div>`
-                      : ""
-                }`
-            : `<div class="empty-state"><span class="empty-state__icon">${icon("bell", 22)}</span><h3>Nessuna notifica</h3><p>Quando una famiglia invia un messaggio, lo vedrai qui.</p></div>`
-        }
-      </section>
-    `;
-  }
-
   function renderAdminOverview() {
     const activeStudents = state.data.students.filter(
       (item) => item.is_active !== false,
@@ -2619,8 +2344,6 @@
           "repeat",
         )}
       </section>
-
-      ${renderAdminNotifications()}
 
       <section class="grid grid--dashboard" style="margin-top:18px">
         <article class="card">
@@ -3262,39 +2985,14 @@
           <div><span>Da saldare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
           <div><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
           <div><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
-          <div><span>Azione</span>${status === "void" ? "<strong>Annullata</strong>" : !["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>Verifica il bonifico</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
+          <div><span>Azione</span>${status === "void" ? "<strong>Annullata</strong>" : !["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>In elaborazione</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
         </div>
       </article>
     `;
   }
 
-  function renderBankNoticeReview(notice) {
-    const invoice = state.data.invoices.find(
-      (item) => item.id === notice.invoice_id,
-    );
-    const student = invoice ? studentForInvoice(invoice) : null;
-    return `
-      <div class="payment-item">
-        <span class="payment-item__copy">
-          <strong>${escapeHTML(fullName(student))} · ${escapeHTML(invoice?.number || "Scadenza")}</strong>
-          <span>Segnalato il ${escapeHTML(formatDate(notice.created_at))} · bonifico del ${escapeHTML(formatDate(notice.transfer_date))}${notice.reference ? ` · rif. ${escapeHTML(notice.reference)}` : ""}</span>
-        </span>
-        <span class="payment-item__amount">
-          <span class="money">${escapeHTML(formatMoney(notice.amount_cents, invoice?.currency || "EUR"))}</span>
-          <span style="display:flex;gap:6px;justify-content:flex-end">
-            <button class="btn btn--secondary btn--sm" type="button" data-action="reject-bank-notice" data-notice-id="${escapeHTML(notice.id)}">Rifiuta</button>
-            <button class="btn btn--primary btn--sm" type="button" data-action="confirm-bank-notice" data-notice-id="${escapeHTML(notice.id)}">${icon("checkSimple", 14)} Conferma</button>
-          </span>
-        </span>
-      </div>
-    `;
-  }
-
   function renderAdminPayments() {
     const invoices = filteredInvoices();
-    const submittedNotices = state.data.bankTransferNotices.filter(
-      (item) => item.status === "submitted",
-    );
     const paidPayments = (state.data.payments || []).filter(
       (payment) =>
         ["completed", "partially_refunded", "refunded"].includes(
@@ -3332,34 +3030,14 @@
       ${pageHeader(
         "Rendicontazione",
         "Pagamenti",
-        "Controlla scadenze, bonifici e pagamenti PayPal.",
+        "Controlla scadenze e incassi registrati.",
         `<button class="btn btn--primary" type="button" data-action="open-invoice-modal">${icon("plus", 17)} Nuova scadenza</button>`,
       )}
       <section class="grid grid--stats">
         ${statCard("Incassato", formatMoney(paidTotal), `${paidPayments.length} pagamenti registrati`, "wallet")}
         ${statCard("Da incassare", formatMoney(outstanding), `${pending.length + overdue.length + processing.length} scadenze aperte`, "receipt")}
         ${statCard("Scaduto", formatMoney(overdue.reduce((sum, item) => sum + invoiceOutstandingCents(item), 0)), `${overdue.length} posizioni da verificare`, "alert")}
-        ${statCard("In verifica", state.data.bankTransferNotices.filter((item) => item.status === "submitted").length, "Bonifici segnalati dalle famiglie", "bank")}
       </section>
-
-      ${
-        submittedNotices.length
-          ? `
-            <section class="card" style="margin-top:22px">
-              <header class="card-header">
-                <div>
-                  <h2>Bonifici da verificare</h2>
-                  <p>Conferma solo dopo aver controllato l’accredito sul conto.</p>
-                </div>
-                ${statusBadge("invoice", "processing")}
-              </header>
-              <div class="payment-list">
-                ${submittedNotices.map(renderBankNoticeReview).join("")}
-              </div>
-            </section>
-          `
-          : ""
-      }
 
       <section style="margin-top:22px">
         <div class="toolbar">
@@ -3447,7 +3125,7 @@
   function renderAdminSettings() {
     const settings = state.data.settings || {};
     const tabs = [
-      ["school", "Studio e contatti"],
+      ["school", "Studio"],
       ["rules", "Anno e recuperi"],
       ["payments", "Pagamenti"],
       ["courses", "Corsi"],
@@ -3459,12 +3137,10 @@
         <form id="settings-school-form">
           <div class="setting-section">
             <h3>Dati dello studio</h3>
-            <p>Queste informazioni compaiono nell’area delle famiglie.</p>
+            <p>Informazioni generali dello studio.</p>
             <div class="form-grid">
               <div class="field"><label for="school-name">Nome</label><input class="input" id="school-name" name="school_name" value="${escapeHTML(settings.school_name || "Studio Quarto MoVimento")}" required /></div>
               <div class="field"><label for="school-address">Indirizzo</label><input class="input" id="school-address" name="school_address" value="${escapeHTML(settings.school_address || "")}" /></div>
-              <div class="field"><label for="support-email">E-mail</label><input class="input" id="support-email" name="support_email" type="email" value="${escapeHTML(settings.support_email || config.supportEmail || "")}" /></div>
-              <div class="field"><label for="support-phone">Telefono</label><input class="input" id="support-phone" name="support_phone" value="${escapeHTML(settings.support_phone || config.supportPhone || "")}" /></div>
             </div>
           </div>
           <div class="modal__footer" style="margin:22px -21px -21px"><button class="btn btn--primary" type="submit">Salva modifiche</button></div>
@@ -3620,7 +3296,7 @@
     if (!student) {
       return `
         ${pageHeader("Area famiglia", "Benvenuti!", "Il profilo non ha ancora allievi associati.", "", true)}
-        <div class="card empty-state"><span class="empty-state__icon">${icon("users", 24)}</span><h3>Associazione in corso</h3><p>Contatta Valeria per completare il collegamento dell’allievo alla tua famiglia.</p>${supportActions(false)}</div>
+        <div class="card empty-state"><span class="empty-state__icon">${icon("users", 24)}</span><h3>Associazione in corso</h3><p>Contatta Valeria per completare il collegamento dell’allievo alla tua famiglia.</p>${supportActions()}</div>
       `;
     }
     const course = courseForStudent(student.id);
@@ -3754,7 +3430,7 @@
         <header class="card-header">
           <div><h2>Serve una mano?</h2><p>Scrivi a Valeria o prenota un colloquio.</p></div>
         </header>
-        ${supportActions(false)}
+        ${supportActions()}
       </section>
     `;
   }
@@ -4046,7 +3722,7 @@
         "Quote e scadenze",
         "Pagamenti",
         "Controlla il saldo e scegli come pagare in sicurezza.",
-        `<button class="btn btn--secondary" type="button" data-action="open-family-notification">${icon("bell", 16)} Avvisa Valeria</button>`,
+        supportActions(),
       )}
       <section class="grid grid--family">
         <article class="balance-card">
@@ -4076,23 +3752,11 @@
                 .map((invoice) => {
                   const student = studentForInvoice(invoice);
                   const status = invoiceEffectiveStatus(invoice);
-                  const latestRejectedNotice = state.data.bankTransferNotices
-                    .filter(
-                      (notice) =>
-                        notice.invoice_id === invoice.id &&
-                        notice.status === "rejected",
-                    )
-                    .sort(
-                      (a, b) =>
-                        new Date(b.reviewed_at || b.created_at || 0) -
-                        new Date(a.reviewed_at || a.created_at || 0),
-                    )[0];
                   return `
                     <div class="payment-item">
                       <span class="payment-item__copy">
                         <strong>${escapeHTML(invoice.title)}</strong>
                         <span>${escapeHTML(fullName(student))} · ${escapeHTML(invoice.number)} · scadenza ${escapeHTML(formatDate(invoice.due_date))}</span>
-                        ${latestRejectedNotice?.review_note ? `<span style="color:var(--danger)">Bonifico non confermato: ${escapeHTML(latestRejectedNotice.review_note)}</span>` : ""}
                       </span>
                       <span class="payment-item__amount">
                         <span class="money">${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</span>
@@ -4166,53 +3830,6 @@
           `<option value="${escapeHTML(family.id)}"${family.id === selectedId ? " selected" : ""}>${escapeHTML(family.display_name || family.guardian_name)}</option>`,
       )
       .join("");
-  }
-
-  function openFamilyNotificationModal() {
-    const selectedStudent = getSelectedStudent();
-    const family = selectedStudent
-      ? familyForStudent(selectedStudent)
-      : state.data.families[0];
-    if (!family) {
-      toast(
-        "Notifica non disponibile",
-        "Il profilo non è ancora associato a una famiglia.",
-        "error",
-      );
-      return;
-    }
-    const familyStudents = state.data.students.filter(
-      (student) =>
-        student.family_id === family.id && student.is_active !== false,
-    );
-    openModal({
-      title: "Invia una notifica a Valeria",
-      subtitle: "Il messaggio comparirà subito nella dashboard amministrativa.",
-      className: "modal--sm",
-      body: `
-        <form id="family-notification-form">
-          <input type="hidden" name="family_id" value="${escapeHTML(family.id)}" />
-          <div class="form-grid">
-            <div class="field field--full"><label for="notification-student">Allievo</label><select class="select" id="notification-student" name="student_id"><option value="">Tutta la famiglia</option>${familyStudents
-              .map(
-                (student) =>
-                  `<option value="${escapeHTML(student.id)}"${student.id === selectedStudent?.id ? " selected" : ""}>${escapeHTML(fullName(student))}</option>`,
-              )
-              .join("")}</select></div>
-            <div class="field field--full"><label for="notification-kind">Argomento</label><select class="select" id="notification-kind" name="kind">${Object.entries(
-              LABELS.notificationKind,
-            )
-              .map(
-                ([key, label]) =>
-                  `<option value="${escapeHTML(key)}">${escapeHTML(label)}</option>`,
-              )
-              .join("")}</select></div>
-            <div class="field field--full"><label for="notification-message">Messaggio</label><textarea class="textarea" id="notification-message" name="message" rows="5" minlength="2" maxlength="2000" placeholder="Scrivi qui la comunicazione…" required></textarea><p class="field-hint">Per urgenze puoi usare anche il tasto “Parlane con Valeria” su WhatsApp.</p></div>
-          </div>
-        </form>
-      `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="family-notification-form">${icon("bell", 15)} Invia notifica</button>`,
-    });
   }
 
   function openStudentModal(studentId) {
@@ -4735,33 +4352,6 @@
     });
   }
 
-  function openRejectBankNotice(noticeId) {
-    const notice = state.data.bankTransferNotices.find(
-      (item) => item.id === noticeId,
-    );
-    if (!notice) return;
-    const invoice = state.data.invoices.find(
-      (item) => item.id === notice.invoice_id,
-    );
-    openModal({
-      title: "Rifiuta segnalazione",
-      subtitle: invoice
-        ? `${invoice.number} · ${formatMoney(notice.amount_cents, invoice.currency)}`
-        : "Bonifico segnalato",
-      className: "modal--sm",
-      body: `
-        <form id="reject-bank-notice-form">
-          <input type="hidden" name="notice_id" value="${escapeHTML(notice.id)}" />
-          <div class="field">
-            <label for="bank-review-note">Motivo da mostrare alla famiglia</label>
-            <textarea class="textarea" id="bank-review-note" name="review_note" rows="4" placeholder="Es. Accredito non ancora presente: verifica data e causale." required></textarea>
-          </div>
-        </form>
-      `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="reject-bank-notice-form">Rifiuta segnalazione</button>`,
-    });
-  }
-
   let paypalSdkPromise = null;
 
   function loadPayPalSdk() {
@@ -4862,7 +4452,7 @@
                 ? `<button class="btn btn--secondary" style="width:100%" type="button" data-action="simulate-paypal" data-invoice-id="${escapeHTML(invoice.id)}">Simula conferma automatica</button><p class="subtle" style="font-size:10px;margin-top:9px">In anteprima non viene eseguito alcun addebito.</p>`
                 : config.paypalClientId
                   ? `<div id="paypal-button-container"></div>`
-                  : `<div class="info-callout">${icon("info", 17)}<p>Dopo il pagamento, Valeria aggiornerà lo stato della quota. Per comunicarlo subito puoi inviare una notifica dalla Home.</p></div>`
+                  : `<div class="info-callout">${icon("info", 17)}<p>Dopo il pagamento, Valeria aggiornerà lo stato della quota. Per qualsiasi dubbio usa “Parlane con Valeria” su WhatsApp.</p></div>`
             }
           </section>
           <section>
@@ -4947,42 +4537,6 @@
       state.selectedStudentId = state.data.students[0]?.id || null;
     }
     if (render !== false) renderShell();
-  }
-
-  async function clearNotificationSubscription() {
-    if (state.notificationsChannel && state.supabase) {
-      await state.supabase.removeChannel(state.notificationsChannel);
-    }
-    state.notificationsChannel = null;
-  }
-
-  async function setupNotificationSubscription() {
-    await clearNotificationSubscription();
-    if (state.mode !== "production" || !state.supabase || !state.user) return;
-    state.notificationsChannel = state.supabase
-      .channel(`family-notifications-${state.user.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "family_notifications",
-        },
-        async (payload) => {
-          try {
-            await refreshData();
-            if (state.role === ROLE_ADMIN && payload.eventType === "INSERT") {
-              toast(
-                "Nuova notifica da una famiglia",
-                "Apri il riepilogo per leggere il messaggio.",
-              );
-            }
-          } catch (error) {
-            console.warn("Aggiornamento notifiche non riuscito:", error);
-          }
-        },
-      )
-      .subscribe();
   }
 
   let attendanceEffectsTimer = null;
@@ -5390,7 +4944,6 @@
         return;
       }
       await refreshData(false);
-      await setupNotificationSubscription();
       state.selectedStudentId =
         state.role === ROLE_FAMILY
           ? state.selectedStudentId || state.data.students[0]?.id || null
@@ -5422,7 +4975,6 @@
 
   async function logout() {
     closeModal();
-    await clearNotificationSubscription();
     if (state.mode === "production" && state.supabase) {
       await state.supabase.auth.signOut();
     }
@@ -5656,26 +5208,6 @@
     }
   }
 
-  async function handleFamilyNotificationStatus(actionTarget) {
-    setButtonLoading(actionTarget, true, "Salvataggio…");
-    try {
-      await state.store.updateFamilyNotification(
-        actionTarget.dataset.notificationId,
-        actionTarget.dataset.status,
-      );
-      await refreshData();
-      toast(
-        actionTarget.dataset.status === "resolved"
-          ? "Notifica risolta"
-          : "Notifica letta",
-        "Lo stato è stato aggiornato.",
-      );
-    } catch (error) {
-      setButtonLoading(actionTarget, false);
-      toast("Notifica non aggiornata", error.message, "error");
-    }
-  }
-
   appRoot.addEventListener("click", async (event) => {
     const actionTarget = event.target.closest("[data-action]");
     if (!actionTarget) return;
@@ -5706,8 +5238,6 @@
       renderShell();
     } else if (action === "open-student-modal") {
       openStudentModal();
-    } else if (action === "open-family-notification") {
-      openFamilyNotificationModal();
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "view-student") {
@@ -5741,37 +5271,10 @@
       openInvoiceDetails(actionTarget.dataset.invoiceId);
     } else if (action === "open-void-invoice") {
       openVoidInvoiceModal(actionTarget.dataset.invoiceId);
-    } else if (action === "confirm-bank-notice") {
-      if (
-        !window.confirm(
-          "Confermi di aver verificato l’accredito? Verrà registrato come incasso.",
-        )
-      ) {
-        return;
-      }
-      setButtonLoading(actionTarget, true, "Conferma…");
-      try {
-        await state.store.confirmBankTransfer(actionTarget.dataset.noticeId);
-        await refreshData();
-        toast("Bonifico confermato", "L’incasso è stato registrato.");
-      } catch (error) {
-        setButtonLoading(actionTarget, false);
-        toast("Bonifico non confermato", error.message, "error");
-      }
-    } else if (action === "reject-bank-notice") {
-      openRejectBankNotice(actionTarget.dataset.noticeId);
     } else if (action === "mark-invoice-paid") {
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
     } else if (action === "pay-invoice") {
       openPaymentModal(actionTarget.dataset.invoiceId);
-    } else if (action === "update-family-notification") {
-      await handleFamilyNotificationStatus(actionTarget);
-    } else if (action === "show-more-notifications") {
-      state.notificationLimit += 8;
-      renderShell();
-    } else if (action === "collapse-notifications") {
-      state.notificationLimit = 8;
-      renderShell();
     } else if (action === "close-modal") {
       closeModal();
     } else if (action === "select-attendance-date") {
@@ -5931,8 +5434,6 @@
     const action = actionTarget.dataset.action;
     if (action === "close-modal") {
       closeModal();
-    } else if (action === "open-family-notification") {
-      openFamilyNotificationModal();
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "delete-student") {
@@ -5941,8 +5442,6 @@
       await handleInviteFamilyAction(actionTarget);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
-    } else if (action === "update-family-notification") {
-      await handleFamilyNotificationStatus(actionTarget);
     } else if (action === "edit-lesson") {
       openEditLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "mark-invoice-paid") {
@@ -6156,23 +5655,6 @@
         } else {
           toast("Allievo aggiunto", "I dati sono stati salvati.");
         }
-      } else if (formId === "family-notification-form") {
-        const notificationMessage = String(values.message || "").trim();
-        if (notificationMessage.length < 2) {
-          throw new Error("Scrivi un messaggio prima di inviare la notifica.");
-        }
-        await state.store.submitFamilyNotification({
-          family_id: values.family_id,
-          student_id: values.student_id || null,
-          kind: values.kind,
-          message: notificationMessage,
-        });
-        closeModal();
-        await refreshData();
-        toast(
-          "Notifica inviata",
-          "Valeria la vedrà nella sua dashboard amministrativa.",
-        );
       } else if (formId === "lesson-form") {
         const start = romeDateTime(values.date, values.time);
         if (Number.isNaN(start.getTime())) {
@@ -6291,17 +5773,6 @@
         closeModal();
         await refreshData();
         toast("Incasso registrato", "La scadenza risulta pagata.");
-      } else if (formId === "reject-bank-notice-form") {
-        await state.store.rejectBankTransfer(
-          values.notice_id,
-          values.review_note,
-        );
-        closeModal();
-        await refreshData();
-        toast(
-          "Segnalazione rifiutata",
-          "La famiglia vedrà il motivo e la scadenza tornerà da pagare.",
-        );
       } else if (formId === "settings-school-form") {
         await state.store.saveSettings(values);
         await refreshData();
@@ -6495,7 +5966,6 @@
         (event, authSession) => {
           window.setTimeout(async () => {
             if (event === "SIGNED_OUT") {
-              await clearNotificationSubscription();
               state.authFingerprint = null;
               state.user = null;
               state.profile = null;

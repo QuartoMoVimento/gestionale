@@ -29,9 +29,7 @@ Area amministrativa:
 - calendario delle lezioni ordinarie e dei recuperi;
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
-- scadenze, pagamenti, bonifici da verificare, annullamenti tracciati e stato
-  dei saldi;
-- notifiche inviate dalle famiglie nella dashboard, con stato letto/risolto;
+- scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
 - invito sicuro dei familiari, senza registrazione pubblica.
 
 Area famiglia:
@@ -39,8 +37,8 @@ Area famiglia:
 - calendario delle lezioni;
 - riepilogo di presenze, assenze e recuperi;
 - scadenze e pagamenti della propria famiglia;
-- pagamento PayPal, coordinate per il bonifico e notifiche a Valeria;
-- contatto diretto via WhatsApp e prenotazione di un colloquio.
+- pagamento PayPal e coordinate per il bonifico;
+- contatto con Valeria esclusivamente via WhatsApp o prenotazione TidyCal.
 
 ## Architettura e responsabilità di sicurezza
 
@@ -138,9 +136,11 @@ modello applicativo, `002_first_admin_bootstrap.sql` aggiunge il bootstrap
 vincolato della prima amministratrice, `003`–`005` consolidano privilegi e
 attribuzione delle operazioni, `006` aggiunge anagrafica estesa, nuovi piani,
 archiviazione sicura e notifiche famiglia–admin, `007`–`009` contengono le
-riconciliazioni intermedie per recuperi e bonifici e `010` introduce
+riconciliazioni intermedie per recuperi e bonifici, `010` introduce
 annullamenti contabili tracciati e restringe la visibilità delle associazioni
-tra familiari.
+tra familiari e `011` disattiva le notifiche interne e le segnalazioni di
+bonifico inviate dalle famiglie, preservando senza modificarle le righe
+storiche.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 

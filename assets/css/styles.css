@@ -2325,102 +2325,6 @@ h4 {
   font-size: 14px;
 }
 
-.notification-list {
-  display: grid;
-  gap: 8px;
-}
-
-.notification-list__more {
-  display: flex;
-  margin-top: 12px;
-  justify-content: center;
-}
-
-.notification-item {
-  display: flex;
-  min-width: 0;
-  padding: 14px;
-  align-items: flex-start;
-  border: 1px solid var(--line);
-  border-radius: 15px;
-  gap: 11px;
-  background: var(--surface);
-}
-
-.notification-item.is-unread {
-  border-color: rgba(15, 167, 184, 0.28);
-  background: var(--brand-aqua-soft);
-}
-
-.notification-dot {
-  width: 9px;
-  min-width: 9px;
-  height: 9px;
-  margin-top: 6px;
-  border-radius: 50%;
-  background: var(--brand-aqua-ink);
-}
-
-.notification-item__copy {
-  min-width: 0;
-  flex: 1;
-  overflow-wrap: anywhere;
-}
-
-.notification-item__copy strong,
-.notification-item__copy span,
-.notification-item__copy p {
-  display: block;
-}
-
-.notification-item__copy strong {
-  font-size: 13px;
-}
-
-.notification-item__copy span,
-.notification-item__copy p {
-  margin: 3px 0 0;
-  color: var(--ink-soft);
-  font-size: 11px;
-}
-
-.notification-item__actions {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.notification-count {
-  display: inline-flex;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  color: var(--brand-blue-dark);
-  background: var(--brand-yellow);
-  font-size: 10px;
-  font-weight: 900;
-  line-height: 1;
-}
-
-.btn--icon.has-notification {
-  position: relative;
-}
-
-.btn--icon .notification-count {
-  position: absolute;
-  top: -7px;
-  right: -7px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border: 2px solid var(--surface);
-}
-
 .balance-card {
   display: flex;
   min-height: 180px;
@@ -3077,19 +2981,6 @@ h4 {
 
   .support-actions .btn {
     flex: 1 1 100%;
-  }
-
-  .notification-item {
-    flex-wrap: wrap;
-  }
-
-  .notification-item__actions {
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .notification-item__actions .btn {
-    flex: 1 1 auto;
   }
 
   .grid--stats,
