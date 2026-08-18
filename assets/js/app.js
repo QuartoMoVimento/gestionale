@@ -368,6 +368,10 @@
     return invoice.status;
   }
 
+  function invoicePaymentStatus(invoice) {
+    return invoiceEffectiveStatus(invoice) === "paid" ? "paid" : "pending";
+  }
+
   function paymentsForInvoice(invoiceId) {
     return (state.data?.payments || []).filter(
       (item) => item.invoice_id === invoiceId,
@@ -544,12 +548,6 @@
     invoice: {
       paid: "Pagato",
       pending: "Da pagare",
-      overdue: "Scaduto",
-      cancelled: "Annullato",
-      partially_paid: "Parziale",
-      processing: "In elaborazione",
-      void: "Annullata",
-      refunded: "Rimborsata",
     },
     lessonType: {
       regular: "Lezione",
@@ -2733,7 +2731,7 @@
                           </span>
                           <span class="payment-item__amount">
                             <span class="money">${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</span>
-                            ${statusBadge("invoice", "overdue")}
+                            ${statusBadge("invoice", invoicePaymentStatus(invoice))}
                           </span>
                         </div>
                       `;
@@ -3211,10 +3209,11 @@
         const haystack =
           `${invoice.number} ${invoice.title} ${fullName(student)} ${family?.display_name || ""}`.toLowerCase();
         const status = invoiceEffectiveStatus(invoice);
+        const paymentStatus = invoicePaymentStatus(invoice);
         return (
           (!query || haystack.includes(query)) &&
           ((state.filters.paymentStatus === "all" && status !== "void") ||
-            status === state.filters.paymentStatus)
+            paymentStatus === state.filters.paymentStatus)
         );
       })
       .sort((a, b) => String(b.due_date).localeCompare(String(a.due_date)));
@@ -3331,7 +3330,7 @@
             </span>
           </div>
           <div class="row-actions">
-            ${statusBadge("invoice", status)}
+            ${statusBadge("invoice", invoicePaymentStatus(invoice))}
             <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
             ${invoiceCanBeVoided(invoice) ? `<button class="row-action" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Elimina scadenza">${icon("trash", 16)}</button>` : ""}
           </div>
@@ -3408,7 +3407,7 @@
             </div>
             <select class="select filter-select" id="payment-status-filter" aria-label="Filtra per stato">
               <option value="all">Tutti gli stati</option>
-              ${["pending", "overdue", "partially_paid", "processing", "paid", "void"]
+              ${["pending", "paid"]
                 .map(
                   (status) =>
                     `<option value="${status}"${state.filters.paymentStatus === status ? " selected" : ""}>${escapeHTML(LABELS.invoice[status])}</option>`,
@@ -3456,7 +3455,7 @@
                             <td><strong>${escapeHTML(invoice.title)}</strong><br><span class="subtle">${escapeHTML(invoice.description || "")}</span></td>
                             <td>${escapeHTML(formatDate(invoice.due_date))}</td>
                             <td><span class="money">${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</span>${invoicePaidCents(invoice) > 0 ? `<br><span class="subtle">su ${escapeHTML(formatMoney(invoice.total_cents, invoice.currency))}</span>` : ""}</td>
-                            <td>${statusBadge("invoice", status)}</td>
+                            <td>${statusBadge("invoice", invoicePaymentStatus(invoice))}</td>
                             <td>
                               <div class="row-actions">
                                 <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
@@ -4178,7 +4177,7 @@
                       <span class="payment-item__amount">
                         <span class="money">${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</span>
                         <span style="display:flex;align-items:center;justify-content:flex-end;gap:6px">
-                          ${statusBadge("invoice", status)}
+                          ${statusBadge("invoice", invoicePaymentStatus(invoice))}
                           ${
                             status === "processing"
                               ? ""
@@ -4752,7 +4751,7 @@
           <div class="bank-box__row"><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
           <div class="bank-box__row"><span>Importo totale</span><strong>${escapeHTML(formatMoney(invoice.total_cents, invoice.currency))}</strong></div>
           <div class="bank-box__row"><span>Incassato</span><strong>${escapeHTML(formatMoney(invoicePaidCents(invoice), invoice.currency))}</strong></div>
-          <div class="bank-box__row"><span>Da incassare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))} ${statusBadge("invoice", status)}</strong></div>
+          <div class="bank-box__row"><span>Da incassare</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))} ${statusBadge("invoice", invoicePaymentStatus(invoice))}</strong></div>
           <div class="bank-box__row"><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
         </div>
         ${status === "void" ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p><strong>Scadenza annullata.</strong> ${escapeHTML(invoice.void_reason || "")}${invoice.voided_at ? ` · ${escapeHTML(formatDate(invoice.voided_at))}` : ""}</p></div>` : ""}
