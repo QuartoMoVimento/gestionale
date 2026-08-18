@@ -615,65 +615,243 @@
   }
 
   const SCHOOL_CLOSURE_TITLE = "Chiusura per festività";
-  const SCHOOL_CLOSURE_FAMILY_NOTE =
-    "La giornata non è conteggiata tra le lezioni, non risulta come assenza e non genera recuperi.";
 
-  function schoolClosureForDate(value) {
-    if (!value || !state.data) return null;
-    const key = /^\d{4}-\d{2}-\d{2}$/.test(String(value))
-      ? String(value)
-      : dateKey(value);
-    return (
-      (state.data.schoolClosures || []).find(
-        (closure) => closure.closure_date === key,
-      ) || null
+const SCHOOL_CLOSURE_FAMILY_NOTE =
+  "La giornata non è conteggiata tra le lezioni, non risulta come assenza e non genera recuperi.";
+
+
+/* =========================================================
+   CHIUSURE AUTOMATICHE A.S. 2026-2027
+   ========================================================= */
+
+function automaticSchoolClosureRange(startDate, endDate, description) {
+  const closures = [];
+
+  const current = new Date(`${startDate}T12:00:00Z`);
+  const end = new Date(`${endDate}T12:00:00Z`);
+
+  while (current <= end) {
+    const closureDate = current.toISOString().slice(0, 10);
+
+    closures.push({
+      id: `automatic-${closureDate}`,
+      closure_date: closureDate,
+      description,
+      automatic: true,
+      is_automatic: true,
+    });
+
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  return closures;
+}
+
+
+function automaticSchoolClosures() {
+  return [
+    /* 1 novembre 2026 */
+    {
+      id: "automatic-2026-11-01",
+      closure_date: "2026-11-01",
+      description:
+        "Oggi non ci sono lezioni. Buona festa di Ognissanti!",
+      automatic: true,
+      is_automatic: true,
+    },
+
+    /* 8 dicembre 2026 */
+    {
+      id: "automatic-2026-12-08",
+      closure_date: "2026-12-08",
+      description:
+        "Oggi non ci sono lezioni. Buona Festa dell’Immacolata!",
+      automatic: true,
+      is_automatic: true,
+    },
+
+    /* Vacanze natalizie: 24 dicembre 2026 - 6 gennaio 2027 */
+    ...automaticSchoolClosureRange(
+      "2026-12-24",
+      "2027-01-06",
+      "Non ci sono lezioni in questo periodo. Buone feste natalizie! 🎄",
+    ),
+
+    /* Pasqua: 27 - 29 marzo 2027 */
+    ...automaticSchoolClosureRange(
+      "2027-03-27",
+      "2027-03-29",
+      "Non ci sono lezioni in questo periodo. Buona Pasqua! 🐣",
+    ),
+
+    /* 25 aprile 2027 */
+    {
+      id: "automatic-2027-04-25",
+      closure_date: "2027-04-25",
+      description:
+        "Oggi non ci sono lezioni. Buon 25 aprile!",
+      automatic: true,
+      is_automatic: true,
+    },
+
+    /* 1 maggio 2027 */
+    {
+      id: "automatic-2027-05-01",
+      closure_date: "2027-05-01",
+      description:
+        "Oggi non ci sono lezioni. Buon Primo Maggio!",
+      automatic: true,
+      is_automatic: true,
+    },
+
+    /* 2 giugno 2027 */
+    {
+      id: "automatic-2027-06-02",
+      closure_date: "2027-06-02",
+      description:
+        "Oggi non ci sono lezioni. Buona Festa della Repubblica!",
+      automatic: true,
+      is_automatic: true,
+    },
+
+    /* Tutto agosto 2027 */
+    ...automaticSchoolClosureRange(
+      "2027-08-01",
+      "2027-08-31",
+      "Pausa estiva: ad agosto non ci sono lezioni. Ci rivediamo a settembre! ☀️",
+    ),
+  ];
+}
+
+
+/* =========================================================
+   RICERCA CHIUSURA PER DATA
+   ========================================================= */
+
+function schoolClosureForDate(value) {
+  if (!value) return null;
+
+  const key = /^\d{4}-\d{2}-\d{2}$/.test(String(value))
+    ? String(value)
+    : dateKey(value);
+
+  /*
+   * Prima controlliamo le chiusure automatiche.
+   * In questo modo le festività da regolamento non possono
+   * essere accidentalmente ignorate.
+   */
+  const automaticClosure = automaticSchoolClosures().find(
+    (closure) => closure.closure_date === key,
+  );
+
+  if (automaticClosure) {
+    return automaticClosure;
+  }
+
+  /*
+   * Poi controlliamo le eventuali chiusure inserite
+   * manualmente dall'amministratore.
+   */
+  return (
+    (state.data?.schoolClosures || []).find(
+      (closure) => closure.closure_date === key,
+    ) || null
+  );
+}
+
+
+/* =========================================================
+   LEZIONI SU GIORNI DI CHIUSURA
+   ========================================================= */
+
+function lessonIsOnSchoolClosure(lesson) {
+  return Boolean(
+    lesson &&
+      schoolClosureForDate(
+        lesson.occurrence_on || lesson.starts_at,
+      ),
+  );
+}
+
+
+/* =========================================================
+   TESTI MOSTRATI ALLA FAMIGLIA
+   ========================================================= */
+
+function schoolClosureDescription(closure) {
+  return String(closure?.description || "").trim();
+}
+
+
+function schoolClosureFamilyDescription(closure) {
+  const description = schoolClosureDescription(closure);
+
+  return `${description ? `${description} ` : ""}${SCHOOL_CLOSURE_FAMILY_NOTE}`;
+}
+
+
+/* =========================================================
+   CHIUSURE RILEVANTI PER UN SINGOLO ALLIEVO
+   ========================================================= */
+
+function schoolClosuresForStudent(studentId) {
+  if (!state.data || !studentId) return [];
+
+  const enrollments = enrollmentsForStudent(studentId);
+
+  /*
+   * Uniamo chiusure manuali e automatiche.
+   * Se per errore esistono entrambe sulla stessa data,
+   * prevale quella automatica prevista dal regolamento.
+   */
+  const closuresByDate = new Map();
+
+  (state.data.schoolClosures || []).forEach((closure) => {
+    closuresByDate.set(closure.closure_date, closure);
+  });
+
+  automaticSchoolClosures().forEach((closure) => {
+    closuresByDate.set(closure.closure_date, closure);
+  });
+
+  return [...closuresByDate.values()]
+    .filter((closure) =>
+      enrollments.some((enrollment) => {
+        const course = state.data.courses.find(
+          (item) => item.id === enrollment.course_id,
+        );
+
+        const closureDate = closure.closure_date;
+
+        if (
+          (enrollment.starts_on &&
+            closureDate < enrollment.starts_on) ||
+          (enrollment.ends_on &&
+            closureDate > enrollment.ends_on)
+        ) {
+          return false;
+        }
+
+        if (!course) return false;
+
+        if (!courseScheduleConfigured(course)) {
+          return true;
+        }
+
+        const closureWeekday =
+          toLocalDate(closureDate).getDay() || 7;
+
+        return (
+          closureWeekday === Number(course.weekday) &&
+          closureDate >= course.starts_on &&
+          closureDate <= course.ends_on
+        );
+      }),
+    )
+    .sort((a, b) =>
+      a.closure_date.localeCompare(b.closure_date),
     );
-  }
-
-  function lessonIsOnSchoolClosure(lesson) {
-    return Boolean(
-      lesson &&
-        schoolClosureForDate(lesson.occurrence_on || lesson.starts_at),
-    );
-  }
-
-  function schoolClosureDescription(closure) {
-    return String(closure?.description || "").trim();
-  }
-
-  function schoolClosureFamilyDescription(closure) {
-    const description = schoolClosureDescription(closure);
-    return `${description ? `${description}. ` : ""}${SCHOOL_CLOSURE_FAMILY_NOTE}`;
-  }
-
-  function schoolClosuresForStudent(studentId) {
-    if (!state.data || !studentId) return [];
-    const enrollments = enrollmentsForStudent(studentId);
-    return [...(state.data.schoolClosures || [])]
-      .filter((closure) =>
-        enrollments.some((enrollment) => {
-          const course = state.data.courses.find(
-            (item) => item.id === enrollment.course_id,
-          );
-          const closureDate = closure.closure_date;
-          if (
-            (enrollment.starts_on && closureDate < enrollment.starts_on) ||
-            (enrollment.ends_on && closureDate > enrollment.ends_on)
-          ) {
-            return false;
-          }
-          if (!course) return false;
-          if (!courseScheduleConfigured(course)) return true;
-          const closureWeekday = toLocalDate(closureDate).getDay() || 7;
-          return (
-            closureWeekday === Number(course.weekday) &&
-            closureDate >= course.starts_on &&
-            closureDate <= course.ends_on
-          );
-        }),
-      )
-      .sort((a, b) => a.closure_date.localeCompare(b.closure_date));
-  }
+}
 
   function paymentMethodLabel(method) {
     return LABELS.paymentMethod[method] || method || "metodo non indicato";
@@ -3492,113 +3670,462 @@
   }
 
   function renderAdminCalendar() {
-    const dates = calendarGridDates(state.calendarMonth);
-    const selectedClosure = schoolClosureForDate(state.calendarSelectedDate);
-    const selectedLessons = state.data.lessons
-      .filter(
-        (item) => dateKey(item.starts_at) === state.calendarSelectedDate,
-      )
-      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
-    const selected = toLocalDate(state.calendarSelectedDate);
+  const dates = calendarGridDates(state.calendarMonth);
 
-    return `
-      ${pageHeader(
-        "Programmazione",
-        "Calendario lezioni",
-        "Le lezioni ordinarie seguono i corsi; qui aggiungi date singole, prove, eventi e recuperi.",
-        `<button class="btn btn--secondary" type="button" data-action="open-course-modal">${icon("plus", 16)} Nuovo corso</button><button class="btn btn--primary" type="button" data-action="open-lesson-modal">${icon("plus", 16)} Nuova lezione</button>`,
-      )}
-      <div class="calendar-layout">
-        <section class="card calendar-card">
-          <div class="calendar-toolbar">
-            <h2>${escapeHTML(formatMonth(state.calendarMonth))}</h2>
-            <div class="calendar-toolbar__nav">
-              <button class="btn btn--secondary btn--icon btn--sm" type="button" data-action="calendar-prev" aria-label="Mese precedente">${icon("chevronLeft", 16)}</button>
-              <button class="btn btn--secondary btn--sm" type="button" data-action="calendar-today">Oggi</button>
-              <button class="btn btn--secondary btn--icon btn--sm" type="button" data-action="calendar-next" aria-label="Mese successivo">${icon("chevronRight", 16)}</button>
-            </div>
+  const selectedClosure = schoolClosureForDate(
+    state.calendarSelectedDate,
+  );
+
+  const selectedLessons = state.data.lessons
+    .filter(
+      (item) =>
+        dateKey(item.starts_at) === state.calendarSelectedDate &&
+        !lessonIsOnSchoolClosure(item),
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.starts_at) - new Date(b.starts_at),
+    );
+
+  const selected = toLocalDate(
+    state.calendarSelectedDate,
+  );
+
+  const selectedClosureIsAutomatic = Boolean(
+    selectedClosure?.automatic ||
+      selectedClosure?.is_automatic,
+  );
+
+  return `
+    ${pageHeader(
+      "Programmazione",
+      "Calendario lezioni",
+      "Le lezioni ordinarie seguono i corsi; qui aggiungi date singole, prove, eventi e recuperi.",
+      `<button class="btn btn--secondary" type="button" data-action="open-course-modal">${icon("plus", 16)} Nuovo corso</button><button class="btn btn--primary" type="button" data-action="open-lesson-modal">${icon("plus", 16)} Nuova lezione</button>`,
+    )}
+
+    <div class="calendar-layout">
+
+      <section class="card calendar-card">
+
+        <div class="calendar-toolbar">
+
+          <h2>${escapeHTML(
+            formatMonth(state.calendarMonth),
+          )}</h2>
+
+          <div class="calendar-toolbar__nav">
+
+            <button
+              class="btn btn--secondary btn--icon btn--sm"
+              type="button"
+              data-action="calendar-prev"
+              aria-label="Mese precedente"
+            >
+              ${icon("chevronLeft", 16)}
+            </button>
+
+            <button
+              class="btn btn--secondary btn--sm"
+              type="button"
+              data-action="calendar-today"
+            >
+              Oggi
+            </button>
+
+            <button
+              class="btn btn--secondary btn--icon btn--sm"
+              type="button"
+              data-action="calendar-next"
+              aria-label="Mese successivo"
+            >
+              ${icon("chevronRight", 16)}
+            </button>
+
           </div>
-          <div class="calendar-grid">
-            ${["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-              .map((day) => `<div class="calendar-weekday">${day}</div>`)
-              .join("")}
-            ${dates
-              .map((date) => {
-                const key = dateKey(date);
-                const closure = schoolClosureForDate(key);
-                const dayLessons = state.data.lessons
-                  .filter((item) => dateKey(item.starts_at) === key)
-                  .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
-                const outside =
-                  date.getMonth() !== state.calendarMonth.getMonth();
-                const visibleLessonCount = closure ? 2 : 3;
-                const hiddenEntries = Math.max(
-                  0,
-                  dayLessons.length + (closure ? 1 : 0) - 3,
+        </div>
+
+        <div class="calendar-grid">
+
+          ${[
+            "Lun",
+            "Mar",
+            "Mer",
+            "Gio",
+            "Ven",
+            "Sab",
+            "Dom",
+          ]
+            .map(
+              (day) =>
+                `<div class="calendar-weekday">${day}</div>`,
+            )
+            .join("")}
+
+          ${dates
+            .map((date) => {
+              const key = dateKey(date);
+
+              const closure =
+                schoolClosureForDate(key);
+
+              /*
+               * IMPORTANTISSIMO:
+               * se il giorno è chiuso, nessuna lezione
+               * deve essere mostrata nel calendario.
+               */
+              const dayLessons = state.data.lessons
+                .filter(
+                  (item) =>
+                    dateKey(item.starts_at) === key &&
+                    !lessonIsOnSchoolClosure(item),
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(a.starts_at) -
+                    new Date(b.starts_at),
                 );
-                return `
-                  <div class="calendar-day${outside ? " is-outside" : ""}${key === todayKey() ? " is-today" : ""}${closure ? " is-closure" : ""}" data-action="calendar-select-day" data-date="${key}" role="button" tabindex="0" aria-label="Seleziona ${escapeHTML(formatDate(date, { day: "numeric", month: "long", year: "numeric" }))}${closure ? `, ${escapeHTML(SCHOOL_CLOSURE_TITLE)}` : ""}">
-                    <span class="calendar-day__number">${date.getDate()}</span>
-                    ${closure ? `<button class="calendar-event is-closure" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(key)}" aria-label="${escapeHTML(`${SCHOOL_CLOSURE_TITLE}, ${formatDate(date, { day: "numeric", month: "long", year: "numeric" })}`)}">${escapeHTML(SCHOOL_CLOSURE_TITLE)}</button>` : ""}
-                    ${dayLessons
-                      .slice(0, visibleLessonCount)
-                      .map((lesson) => {
-                        const course = courseForLesson(lesson);
-                        const isMakeup = ["makeup", "recovery"].includes(
-                          lesson.lesson_type,
-                        );
-                        return `<button class="calendar-event${isMakeup ? " is-makeup" : ""}" style="border-left-color:${safeColor(course?.color)}" type="button" data-action="view-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${escapeHTML(formatTime(lesson.starts_at))} ${escapeHTML(lesson.title || course?.name || "Lezione")}</button>`;
-                      })
-                      .join("")}
-                    ${hiddenEntries ? `<span class="calendar-more">+${hiddenEntries} ${hiddenEntries === 1 ? "altro" : "altri"}</span>` : ""}
-                  </div>
-                `;
-              })
-              .join("")}
-          </div>
-        </section>
 
-        <aside class="card agenda-card">
-          <div class="agenda-date">
-            <span class="agenda-date__day">
-              <span>${escapeHTML(formatDate(selected, { weekday: "short" }))}</span>
-              <strong>${selected.getDate()}</strong>
+              const outside =
+                date.getMonth() !==
+                state.calendarMonth.getMonth();
+
+              /*
+               * In un giorno di chiusura mostriamo
+               * soltanto la chiusura.
+               */
+              const visibleLessonCount =
+                closure ? 0 : 3;
+
+              const hiddenEntries =
+                closure
+                  ? 0
+                  : Math.max(
+                      0,
+                      dayLessons.length - 3,
+                    );
+
+              return `
+                <div
+                  class="calendar-day${outside ? " is-outside" : ""}${key === todayKey() ? " is-today" : ""}${closure ? " is-closure" : ""}"
+                  data-action="calendar-select-day"
+                  data-date="${key}"
+                  role="button"
+                  tabindex="0"
+                  aria-label="Seleziona ${escapeHTML(
+                    formatDate(date, {
+                      day: "numeric",
+                      month: "long",
+                      year: "numeric",
+                    }),
+                  )}${
+                    closure
+                      ? `, ${escapeHTML(
+                          SCHOOL_CLOSURE_TITLE,
+                        )}`
+                      : ""
+                  }"
+                >
+
+                  <span class="calendar-day__number">
+                    ${date.getDate()}
+                  </span>
+
+                  ${
+                    closure
+                      ? `
+                        <button
+                          class="calendar-event is-closure"
+                          type="button"
+                          data-action="open-school-closure-modal"
+                          data-date="${escapeHTML(key)}"
+                          aria-label="${escapeHTML(
+                            `${SCHOOL_CLOSURE_TITLE}, ${formatDate(
+                              date,
+                              {
+                                day: "numeric",
+                                month: "long",
+                                year: "numeric",
+                              },
+                            )}`,
+                          )}"
+                        >
+                          ${escapeHTML(
+                            SCHOOL_CLOSURE_TITLE,
+                          )}
+                        </button>
+                      `
+                      : ""
+                  }
+
+                  ${dayLessons
+                    .slice(
+                      0,
+                      visibleLessonCount,
+                    )
+                    .map((lesson) => {
+                      const course =
+                        courseForLesson(lesson);
+
+                      const isMakeup = [
+                        "makeup",
+                        "recovery",
+                      ].includes(
+                        lesson.lesson_type,
+                      );
+
+                      return `
+                        <button
+                          class="calendar-event${
+                            isMakeup
+                              ? " is-makeup"
+                              : ""
+                          }"
+                          style="border-left-color:${safeColor(
+                            course?.color,
+                          )}"
+                          type="button"
+                          data-action="view-lesson"
+                          data-lesson-id="${escapeHTML(
+                            lesson.id,
+                          )}"
+                        >
+                          ${escapeHTML(
+                            formatTime(
+                              lesson.starts_at,
+                            ),
+                          )}
+                          ${escapeHTML(
+                            lesson.title ||
+                              course?.name ||
+                              "Lezione",
+                          )}
+                        </button>
+                      `;
+                    })
+                    .join("")}
+
+                  ${
+                    hiddenEntries
+                      ? `
+                        <span class="calendar-more">
+                          +${hiddenEntries}
+                          ${
+                            hiddenEntries === 1
+                              ? "altro"
+                              : "altri"
+                          }
+                        </span>
+                      `
+                      : ""
+                  }
+
+                </div>
+              `;
+            })
+            .join("")}
+
+        </div>
+      </section>
+
+      <aside class="card agenda-card">
+
+        <div class="agenda-date">
+
+          <span class="agenda-date__day">
+            <span>
+              ${escapeHTML(
+                formatDate(selected, {
+                  weekday: "short",
+                }),
+              )}
             </span>
-            <span class="agenda-date__copy">
-              <strong>${escapeHTML(formatDate(selected, { month: "long", year: "numeric" }))}</strong>
-              <span>${selectedClosure ? SCHOOL_CLOSURE_TITLE : `${selectedLessons.length} ${selectedLessons.length === 1 ? "appuntamento" : "appuntamenti"}`}</span>
+
+            <strong>
+              ${selected.getDate()}
+            </strong>
+          </span>
+
+          <span class="agenda-date__copy">
+
+            <strong>
+              ${escapeHTML(
+                formatDate(selected, {
+                  month: "long",
+                  year: "numeric",
+                }),
+              )}
+            </strong>
+
+            <span>
+              ${
+                selectedClosure
+                  ? SCHOOL_CLOSURE_TITLE
+                  : `${selectedLessons.length} ${
+                      selectedLessons.length === 1
+                        ? "appuntamento"
+                        : "appuntamenti"
+                    }`
+              }
             </span>
-          </div>
-          ${
-            selectedClosure || selectedLessons.length
-              ? `${
-                  selectedClosure
-                    ? `<button class="agenda-item is-closure" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(state.calendarSelectedDate)}" style="width:100%;background:transparent;text-align:left;cursor:pointer"><strong>${escapeHTML(SCHOOL_CLOSURE_TITLE)}</strong><span>${escapeHTML(schoolClosureDescription(selectedClosure) || "Lo studio resta chiuso per l’intera giornata.")}</span></button>`
-                    : ""
-                }${selectedLessons
+
+          </span>
+
+        </div>
+
+        ${
+          selectedClosure
+            ? `
+              <div
+                class="agenda-item is-closure"
+                style="width:100%;background:transparent;text-align:left"
+              >
+                <strong>
+                  ${escapeHTML(
+                    SCHOOL_CLOSURE_TITLE,
+                  )}
+                </strong>
+
+                <span>
+                  ${escapeHTML(
+                    schoolClosureDescription(
+                      selectedClosure,
+                    ) ||
+                      "Lo studio resta chiuso per l’intera giornata.",
+                  )}
+                </span>
+              </div>
+            `
+            : selectedLessons.length
+              ? selectedLessons
                   .map((lesson) => {
-                    const course = courseForLesson(lesson);
+                    const course =
+                      courseForLesson(lesson);
+
                     return `
-                      <button class="agenda-item" type="button" data-action="view-lesson" data-lesson-id="${escapeHTML(lesson.id)}" style="width:100%;background:transparent;text-align:left;cursor:pointer">
-                        <strong>${escapeHTML(formatTime(lesson.starts_at))} · ${escapeHTML(lesson.title || course?.name || "Lezione")}</strong>
-                        <span>${escapeHTML(LABELS.lessonType[lesson.lesson_type] || lesson.lesson_type)} · ${studentsForLesson(lesson).length} allievi</span>
+                      <button
+                        class="agenda-item"
+                        type="button"
+                        data-action="view-lesson"
+                        data-lesson-id="${escapeHTML(
+                          lesson.id,
+                        )}"
+                        style="width:100%;background:transparent;text-align:left;cursor:pointer"
+                      >
+                        <strong>
+                          ${escapeHTML(
+                            formatTime(
+                              lesson.starts_at,
+                            ),
+                          )}
+                          ·
+                          ${escapeHTML(
+                            lesson.title ||
+                              course?.name ||
+                              "Lezione",
+                          )}
+                        </strong>
+
+                        <span>
+                          ${escapeHTML(
+                            LABELS.lessonType[
+                              lesson.lesson_type
+                            ] ||
+                              lesson.lesson_type,
+                          )}
+                          ·
+                          ${
+                            studentsForLesson(
+                              lesson,
+                            ).length
+                          }
+                          allievi
+                        </span>
+
                       </button>
                     `;
                   })
-                  .join("")}`
+                  .join("")
               : `
-                <div class="empty-state" style="min-height:150px;padding:20px 0">
-                  <span class="empty-state__icon">${icon("calendar", 21)}</span>
+                <div
+                  class="empty-state"
+                  style="min-height:150px;padding:20px 0"
+                >
+                  <span class="empty-state__icon">
+                    ${icon("calendar", 21)}
+                  </span>
+
                   <h3>Giornata libera</h3>
-                  <p>Nessuna lezione in questa data.</p>
+
+                  <p>
+                    Nessuna lezione in questa data.
+                  </p>
                 </div>
               `
-          }
-          ${selectedClosure ? `<button class="btn btn--secondary btn--sm" style="width:100%;margin-top:12px" type="button" data-action="delete-school-closure" data-closure-id="${escapeHTML(selectedClosure.id)}">Riapri questa data</button>` : `<button class="btn btn--secondary btn--sm" style="width:100%;margin-top:12px" type="button" data-action="open-school-closure-modal" data-date="${escapeHTML(state.calendarSelectedDate)}">${icon("calendar", 14)} Segna chiusura</button><button class="btn btn--secondary btn--sm" style="width:100%;margin-top:8px" type="button" data-action="open-lesson-modal" data-date="${escapeHTML(state.calendarSelectedDate)}">${icon("plus", 14)} Aggiungi qui</button>`}
-        </aside>
-      </div>
-    `;
-  }
+        }
+
+        ${
+          selectedClosure
+            ? selectedClosureIsAutomatic
+              ? `
+                <div
+                  class="info-callout"
+                  style="margin-top:12px"
+                >
+                  ${icon("info", 16)}
+                  <p>
+                    Chiusura prevista dal regolamento
+                    scolastico.
+                  </p>
+                </div>
+              `
+              : `
+                <button
+                  class="btn btn--secondary btn--sm"
+                  style="width:100%;margin-top:12px"
+                  type="button"
+                  data-action="delete-school-closure"
+                  data-closure-id="${escapeHTML(
+                    selectedClosure.id,
+                  )}"
+                >
+                  Riapri questa data
+                </button>
+              `
+            : `
+              <button
+                class="btn btn--secondary btn--sm"
+                style="width:100%;margin-top:12px"
+                type="button"
+                data-action="open-school-closure-modal"
+                data-date="${escapeHTML(
+                  state.calendarSelectedDate,
+                )}"
+              >
+                ${icon("calendar", 14)}
+                Segna chiusura
+              </button>
+
+              <button
+                class="btn btn--secondary btn--sm"
+                style="width:100%;margin-top:8px"
+                type="button"
+                data-action="open-lesson-modal"
+                data-date="${escapeHTML(
+                  state.calendarSelectedDate,
+                )}"
+              >
+                ${icon("plus", 14)}
+                Aggiungi qui
+              </button>
+            `
+        }
+
+      </aside>
+
+    </div>
+  `;
+}
 
   function filteredInvoices() {
     const query = state.filters.paymentSearch.trim().toLowerCase();
@@ -4928,7 +5455,23 @@
 
   function openSchoolClosureModal(dateValue) {
     const date = dateValue || state.calendarSelectedDate || todayKey();
-    const closure = schoolClosureForDate(date);
+const closure =
+  (state.data.schoolClosures || []).find(
+    (item) => item.closure_date === date,
+  ) || null;
+
+const automaticClosure =
+  automaticSchoolClosures().find(
+    (item) => item.closure_date === date,
+  ) || null;
+
+if (automaticClosure) {
+  toast(
+    "Chiusura prevista dal regolamento",
+    automaticClosure.description,
+  );
+  return;
+}
     if (!closure && date < todayKey()) {
       toast(
         "Data non modificabile",
