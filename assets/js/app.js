@@ -62,6 +62,7 @@
     },
     settingsTab: "school",
     authListener: null,
+    paymentReminderChannel: null,
     authFingerprint: null,
     lastDataRefreshAt: 0,
   };
@@ -416,6 +417,84 @@
         ["submitted", "verified"].includes(notice.status),
     );
     return !hasActivePayment && !hasActiveNotice;
+  }
+
+  function invoiceReminderThresholdReached(invoice) {
+    return Boolean(
+      invoice?.due_date &&
+        dateKey(addDays(invoice.due_date, 5)) <= todayKey(),
+    );
+  }
+
+  function paymentReminderForInvoice(invoiceId) {
+    return (state.data?.paymentReminders || []).find(
+      (reminder) => reminder.invoice_id === invoiceId,
+    );
+  }
+
+  function invoiceHasSettlementInProgress(invoice) {
+    if (!invoice) return false;
+    const hasSubmittedBankTransfer = (
+      state.data?.bankTransferNotices || []
+    ).some(
+      (notice) =>
+        notice.invoice_id === invoice.id && notice.status === "submitted",
+    );
+    const hasPendingPaypalPayment = paymentsForInvoice(invoice.id).some(
+      (payment) =>
+        payment.provider === "paypal" &&
+        ["pending", "capturing"].includes(payment.status),
+    );
+    return hasSubmittedBankTransfer || hasPendingPaypalPayment;
+  }
+
+  function invoiceIsReminderEligible(invoice) {
+    const status = invoiceEffectiveStatus(invoice);
+    return (
+      invoiceReminderThresholdReached(invoice) &&
+      invoiceOutstandingCents(invoice) > 0 &&
+      !invoiceHasSettlementInProgress(invoice) &&
+      ["overdue", "partially_paid"].includes(status)
+    );
+  }
+
+  function canSendPaymentReminder(invoice) {
+    return (
+      state.data?.paymentRemindersAvailable !== false &&
+      invoiceIsReminderEligible(invoice) &&
+      familyLinkedAccessEmails(invoice.family_id).length > 0 &&
+      !paymentReminderForInvoice(invoice.id)
+    );
+  }
+
+  function activePaymentReminderEntries(studentId) {
+    return (state.data?.paymentReminders || [])
+      .map((reminder) => {
+        const invoice = state.data?.invoices?.find(
+          (item) => item.id === reminder.invoice_id,
+        );
+        return { reminder, invoice };
+      })
+      .filter(({ invoice }) => {
+        if (
+          !invoice ||
+          (studentId && invoice.student_id && invoice.student_id !== studentId)
+        ) {
+          return false;
+        }
+        return (
+          invoiceOutstandingCents(invoice) > 0 &&
+          !invoiceHasSettlementInProgress(invoice) &&
+          !["paid", "void", "refunded", "processing"].includes(
+            invoiceEffectiveStatus(invoice),
+          )
+        );
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.reminder.sent_at || b.reminder.created_at || 0) -
+          new Date(a.reminder.sent_at || a.reminder.created_at || 0),
+      );
   }
 
   function makeupEffectiveStatus(credit) {
@@ -907,14 +986,19 @@
             studentIds.includes(item.student_id) &&
             lessonIds.includes(item.lesson_id),
         );
-        copy.invoices = copy.invoices.filter((item) =>
-          studentIds.includes(item.student_id),
+        copy.invoices = copy.invoices.filter(
+          (item) =>
+            item.family_id === familyId &&
+            (!item.student_id || studentIds.includes(item.student_id)),
         );
         const invoiceIds = copy.invoices.map((item) => item.id);
         copy.payments = copy.payments.filter((item) =>
           invoiceIds.includes(item.invoice_id),
         );
         copy.bankTransferNotices = copy.bankTransferNotices.filter((item) =>
+          invoiceIds.includes(item.invoice_id),
+        );
+        copy.paymentReminders = (copy.paymentReminders || []).filter((item) =>
           invoiceIds.includes(item.invoice_id),
         );
         copy.makeupCredits = copy.makeupCredits.filter((item) =>
@@ -1466,6 +1550,35 @@
       return payment;
     }
 
+    async sendPaymentReminder(invoiceId) {
+      const invoice = this.data.invoices.find((item) => item.id === invoiceId);
+      if (!invoice) throw new Error("Scadenza non trovata.");
+      if (!invoiceIsReminderEligible(invoice)) {
+        throw new Error(
+          "Il promemoria è disponibile solo dopo 5 giorni di insoluto.",
+        );
+      }
+      this.data.paymentReminders = this.data.paymentReminders || [];
+      if (
+        this.data.paymentReminders.some(
+          (item) => item.invoice_id === invoiceId,
+        )
+      ) {
+        throw new Error("Il promemoria è già stato inviato.");
+      }
+      const notification = {
+        id: `payment-reminder-${Date.now()}`,
+        invoice_id: invoice.id,
+        family_id: invoice.family_id,
+        student_id: invoice.student_id || null,
+        sent_by: "demo-admin",
+        sent_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+      this.data.paymentReminders.unshift(notification);
+      return { created: true, reason: "sent", reminder: notification };
+    }
+
     async assignMakeup(creditId, lessonId) {
       const credit = this.data.makeupCredits.find(
         (item) => item.id === creditId,
@@ -1555,6 +1668,26 @@
       return result.data;
     }
 
+    async loadPaymentReminders() {
+      try {
+        const rows = await this.query("payment_reminders", "*", (query) =>
+          query.order("sent_at", { ascending: false }),
+        );
+        return { available: true, rows };
+      } catch (error) {
+        const message = String(error?.message || "");
+        if (
+          ["42P01", "PGRST205"].includes(error?.code) ||
+          /payment_reminders.*(schema cache|does not exist|non esiste)/i.test(
+            message,
+          )
+        ) {
+          return { available: false, rows: [] };
+        }
+        throw error;
+      }
+    }
+
     async loadData(role) {
       const [
         families,
@@ -1567,6 +1700,7 @@
         invoices,
         payments,
         bankTransferNotices,
+        paymentReminderResult,
         makeupCredits,
         settingRows,
       ] = await Promise.all([
@@ -1604,6 +1738,7 @@
         this.query("bank_transfer_notices", "*", (query) =>
           query.order("created_at", { ascending: false }),
         ),
+        this.loadPaymentReminders(),
         this.query("makeup_credits", "*", (query) =>
           query.order("created_at", { ascending: false }),
         ),
@@ -1626,6 +1761,8 @@
         invoices,
         payments,
         bankTransferNotices,
+        paymentReminders: paymentReminderResult.rows,
+        paymentRemindersAvailable: paymentReminderResult.available,
         makeupCredits,
         settings,
       };
@@ -1882,6 +2019,15 @@
           p_payment_id: paymentId,
           p_reason: reason,
         },
+      );
+      if (error) throw error;
+      return data;
+    }
+
+    async sendPaymentReminder(invoiceId) {
+      const { data, error } = await this.client.rpc(
+        "admin_send_payment_reminder",
+        { p_invoice_id: invoiceId },
       );
       if (error) throw error;
       return data;
@@ -2971,6 +3117,8 @@
   function renderInvoiceMobileRow(invoice) {
     const student = studentForInvoice(invoice);
     const status = invoiceEffectiveStatus(invoice);
+    const reminder = paymentReminderForInvoice(invoice.id);
+    const canSendReminder = canSendPaymentReminder(invoice);
     return `
       <article class="mobile-row">
         <div class="mobile-row__top">
@@ -2992,6 +3140,7 @@
           <div><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
           <div><span>Numero fattura</span><strong>${escapeHTML(invoice.number)}</strong></div>
           <div><span>Azione</span>${status === "void" ? "<strong>Annullata</strong>" : !["paid", "processing"].includes(status) ? `<button class="copy-button" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">Segna pagato</button>` : status === "processing" ? "<strong>In elaborazione</strong>" : `<strong>${escapeHTML(paymentMethodLabel(invoice.payment_method))}</strong>`}</div>
+          ${reminder ? `<div><span>Promemoria</span><strong>Inviato il ${escapeHTML(formatDate(reminder.sent_at || reminder.created_at))}</strong></div>` : canSendReminder ? `<div><span>Promemoria</span><button class="copy-button" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}">Invia notifica</button></div>` : ""}
         </div>
       </article>
     `;
@@ -3031,6 +3180,9 @@
       (sum, item) => sum + invoiceOutstandingCents(item),
       0,
     );
+    const remindersToSend = state.data.invoices.filter(
+      canSendPaymentReminder,
+    );
 
     return `
       ${pageHeader(
@@ -3043,6 +3195,7 @@
         ${statCard("Incassato", formatMoney(paidTotal), `${paidPayments.length} pagamenti registrati`, "wallet")}
         ${statCard("Da incassare", formatMoney(outstanding), `${pending.length + overdue.length + processing.length} scadenze aperte`, "receipt")}
         ${statCard("Scaduto", formatMoney(overdue.reduce((sum, item) => sum + invoiceOutstandingCents(item), 0)), `${overdue.length} posizioni da verificare`, "alert")}
+        ${statCard("Da sollecitare", remindersToSend.length, "Insoluti da almeno 5 giorni", "bell")}
       </section>
 
       <section style="margin-top:22px">
@@ -3086,6 +3239,8 @@
                       .map((invoice) => {
                         const student = studentForInvoice(invoice);
                         const status = invoiceEffectiveStatus(invoice);
+                        const reminder = paymentReminderForInvoice(invoice.id);
+                        const canSendReminder = canSendPaymentReminder(invoice);
                         return `
                           <tr>
                             <td>
@@ -3104,6 +3259,8 @@
                             <td>
                               <div class="row-actions">
                                 <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
+                                ${canSendReminder ? `<button class="row-action" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}" title="Invia notifica alla famiglia" aria-label="Invia promemoria di pagamento">${icon("bell", 16)}</button>` : ""}
+                                ${reminder ? `<button class="row-action" type="button" disabled title="Promemoria inviato il ${escapeHTML(formatDate(reminder.sent_at || reminder.created_at))}" aria-label="Promemoria già inviato">${icon("bell", 16)}</button>` : ""}
                                 ${
                                   !["paid", "processing", "void"].includes(status)
                                     ? `<button class="row-action" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Segna come pagato">${icon("checkSimple", 16)}</button>`
@@ -3297,6 +3454,48 @@
       .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
   }
 
+  function renderFamilyPaymentReminders(studentId) {
+    const entries = activePaymentReminderEntries(studentId);
+    if (!entries.length) return "";
+    return `
+      <section class="card card--tinted-yellow" style="margin-bottom:18px">
+        <header class="card-header">
+          <div>
+            <h2>Promemoria di pagamento</h2>
+            <p>${entries.length === 1 ? "Una quota risulta insoluta da almeno 5 giorni." : `${entries.length} quote risultano insolute da almeno 5 giorni.`}</p>
+          </div>
+          <span class="stat-card__icon">${icon("bell", 18)}</span>
+        </header>
+        <div class="payment-list">
+          ${entries
+            .map(({ reminder, invoice }) => {
+              const student = studentForInvoice(invoice);
+              const contactUrl = whatsappUrl(
+                `Ciao Valeria, vorrei parlarti del promemoria per la fattura ${invoice.number} di ${fullName(student)}.`,
+              );
+              return `
+                <div class="payment-item">
+                  <span class="payment-item__copy">
+                    <strong>${escapeHTML(invoice.title)}</strong>
+                    <span>${escapeHTML(fullName(student))} · fattura ${escapeHTML(invoice.number)} · scaduta il ${escapeHTML(formatDate(invoice.due_date))}</span>
+                    <span>Promemoria ricevuto il ${escapeHTML(formatDate(reminder.sent_at || reminder.created_at))}. Se hai già pagato, non effettuare un secondo pagamento: contatta Valeria.</span>
+                  </span>
+                  <span class="payment-item__amount">
+                    <span class="money">${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</span>
+                    <span style="display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap">
+                      <a class="btn btn--secondary btn--sm" href="${escapeHTML(contactUrl)}" target="_blank" rel="noopener noreferrer">Parlane con Valeria</a>
+                      <button class="btn btn--primary btn--sm" type="button" data-action="pay-invoice" data-invoice-id="${escapeHTML(invoice.id)}">Paga ora</button>
+                    </span>
+                  </span>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      </section>
+    `;
+  }
+
   function renderFamilyHome() {
     const student = getSelectedStudent();
     if (!student) {
@@ -3351,6 +3550,8 @@
         familyStudentSwitcher(),
         true,
       )}
+
+      ${renderFamilyPaymentReminders()}
 
       <section class="grid grid--family">
         <article class="hero-card">
@@ -3738,6 +3939,7 @@
         "Controlla il saldo e scegli come pagare in sicurezza.",
         supportActions(),
       )}
+      ${renderFamilyPaymentReminders()}
       <section class="grid grid--family">
         <article class="balance-card">
           <div>
@@ -4260,6 +4462,8 @@
       (item) => item.id === invoice.family_id,
     );
     const status = invoiceEffectiveStatus(invoice);
+    const reminder = paymentReminderForInvoice(invoice.id);
+    const canSendReminder = canSendPaymentReminder(invoice);
     const ledger = paymentsForInvoice(invoice.id)
       .filter((item) =>
         ["completed", "partially_refunded", "refunded", "cancelled"].includes(
@@ -4284,6 +4488,7 @@
           <div class="bank-box__row"><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
         </div>
         ${status === "void" ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p><strong>Scadenza annullata.</strong> ${escapeHTML(invoice.void_reason || "")}${invoice.voided_at ? ` · ${escapeHTML(formatDate(invoice.voided_at))}` : ""}</p></div>` : ""}
+        ${reminder ? `<div class="info-callout" style="margin-top:16px">${icon("bell", 17)}<p><strong>Promemoria inviato alla famiglia il ${escapeHTML(formatDate(reminder.sent_at || reminder.created_at))}.</strong> Resterà visibile finché la quota risulta insoluta.</p></div>` : ""}
         <div class="activity-list" style="margin-top:16px">
           <div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.display_name || "—")}</strong><span>${escapeHTML(family?.email || "")}</span></span></div>
           <div class="activity-item"><span class="activity-icon">${icon("receipt", 16)}</span><span class="activity-copy"><strong>${escapeHTML(invoice.description || invoice.title)}</strong><span>${invoice.paid_at ? `Pagato il ${escapeHTML(formatDate(invoice.paid_at))}` : "In attesa di pagamento"}</span></span></div>
@@ -4303,7 +4508,36 @@
             : ""
         }
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${invoiceCanBeVoided(invoice) ? `<button class="btn btn--danger" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina scadenza</button>` : ""}${!["paid", "processing", "void"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${canSendReminder ? `<button class="btn btn--secondary" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}">${icon("bell", 15)} Invia notifica</button>` : ""}${invoiceCanBeVoided(invoice) ? `<button class="btn btn--danger" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina scadenza</button>` : ""}${!["paid", "processing", "void"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
+    });
+  }
+
+  function openPaymentReminderModal(invoiceId) {
+    const invoice = state.data.invoices.find((item) => item.id === invoiceId);
+    if (!invoice || !canSendPaymentReminder(invoice)) return;
+    const student = studentForInvoice(invoice);
+    const family = state.data.families.find(
+      (item) => item.id === invoice.family_id,
+    );
+    const linkedEmails = familyLinkedAccessEmails(family);
+    openModal({
+      title: "Invia promemoria di pagamento",
+      subtitle: `${invoice.number} · ${fullName(student)}`,
+      className: "modal--sm",
+      body: `
+        <form id="payment-reminder-form">
+          <input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />
+          <div class="info-callout">${icon("bell", 17)}<p>La notifica comparirà nell’area della famiglia. Non invia un’e-mail o un messaggio WhatsApp e non permette risposte interne.</p></div>
+          <div class="bank-box" style="margin-top:16px">
+            <div class="bank-box__row"><span>Famiglia</span><strong>${escapeHTML(family?.display_name || "—")}</strong></div>
+            <div class="bank-box__row"><span>Account collegati</span><strong>${escapeHTML(linkedEmails.join(", ") || "Nessuno")}</strong></div>
+            <div class="bank-box__row"><span>Scadenza</span><strong>${escapeHTML(formatDate(invoice.due_date))}</strong></div>
+            <div class="bank-box__row"><span>Saldo insoluto</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
+          </div>
+          <p class="muted" style="font-size:12px;margin-top:14px">Per questa fattura potrà essere inviato un solo promemoria. L’avviso sparirà dall’area famiglia quando il saldo verrà registrato.</p>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="payment-reminder-form">${icon("bell", 15)} Invia notifica</button>`,
     });
   }
 
@@ -4551,6 +4785,69 @@
       state.selectedStudentId = state.data.students[0]?.id || null;
     }
     if (render !== false) renderShell();
+  }
+
+  let paymentReminderRealtimeRefreshInFlight = false;
+
+  async function stopPaymentReminderRealtime() {
+    const channel = state.paymentReminderChannel;
+    state.paymentReminderChannel = null;
+    paymentReminderRealtimeRefreshInFlight = false;
+    if (!channel || !state.supabase) return;
+    try {
+      await state.supabase.removeChannel(channel);
+    } catch (error) {
+      console.warn("Chiusura aggiornamenti promemoria non riuscita:", error);
+    }
+  }
+
+  function startPaymentReminderRealtime() {
+    if (
+      state.mode !== "production" ||
+      state.role !== ROLE_FAMILY ||
+      !state.user ||
+      !state.supabase ||
+      state.data?.paymentRemindersAvailable === false ||
+      state.paymentReminderChannel
+    ) {
+      return;
+    }
+
+    const channel = state.supabase.channel(
+      `payment-reminders:${state.user.id}`,
+    );
+    channel.on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "payment_reminders" },
+      async (payload) => {
+        if (
+          state.paymentReminderChannel !== channel ||
+          paymentReminderRealtimeRefreshInFlight
+        ) {
+          return;
+        }
+        paymentReminderRealtimeRefreshInFlight = true;
+        try {
+          await refreshData();
+          if (paymentReminderForInvoice(payload.new?.invoice_id)) {
+            toast(
+              "Nuovo promemoria di pagamento",
+              "Controlla la quota nella Home o nella sezione Pagamenti.",
+            );
+          }
+        } catch (error) {
+          console.warn("Aggiornamento promemoria non riuscito:", error);
+        } finally {
+          paymentReminderRealtimeRefreshInFlight = false;
+        }
+      },
+    );
+    state.paymentReminderChannel = channel;
+    channel.subscribe((status) => {
+      if (["CHANNEL_ERROR", "TIMED_OUT"].includes(status)) {
+        console.warn("Aggiornamenti promemoria non disponibili:", status);
+      }
+    });
   }
 
   let attendanceEffectsTimer = null;
@@ -4942,17 +5239,20 @@
       state.user = user;
       state.profile = await state.store.loadProfile(user.id);
       if (!state.profile) {
+        await stopPaymentReminderRealtime();
         state.role = null;
         renderAccessPending();
         return;
       }
       if (state.profile.is_active === false) {
+        await stopPaymentReminderRealtime();
         state.role = null;
         renderAccessPending(true);
         return;
       }
       state.role = state.profile.role;
       if (![ROLE_ADMIN, ROLE_FAMILY].includes(state.role)) {
+        await stopPaymentReminderRealtime();
         state.role = null;
         renderAccessPending();
         return;
@@ -4981,6 +5281,11 @@
         replaceAppRoute(current, true);
       }
       renderShell();
+      if (state.role === ROLE_FAMILY) {
+        startPaymentReminderRealtime();
+      } else {
+        await stopPaymentReminderRealtime();
+      }
       if (needsPassword) openSetPasswordModal();
     } catch (error) {
       renderFatalError(error);
@@ -4989,6 +5294,7 @@
 
   async function logout() {
     closeModal();
+    await stopPaymentReminderRealtime();
     if (state.mode === "production" && state.supabase) {
       await state.supabase.auth.signOut();
     }
@@ -5285,6 +5591,8 @@
       openInvoiceDetails(actionTarget.dataset.invoiceId);
     } else if (action === "open-void-invoice") {
       openVoidInvoiceModal(actionTarget.dataset.invoiceId);
+    } else if (action === "open-payment-reminder") {
+      openPaymentReminderModal(actionTarget.dataset.invoiceId);
     } else if (action === "mark-invoice-paid") {
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
     } else if (action === "pay-invoice") {
@@ -5462,6 +5770,8 @@
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
     } else if (action === "open-void-invoice") {
       openVoidInvoiceModal(actionTarget.dataset.invoiceId);
+    } else if (action === "open-payment-reminder") {
+      openPaymentReminderModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-cancel-payment") {
       openCancelManualPaymentModal(actionTarget.dataset.paymentId);
     } else if (action === "open-cancel-lesson") {
@@ -5787,6 +6097,20 @@
         closeModal();
         await refreshData();
         toast("Incasso registrato", "La scadenza risulta pagata.");
+      } else if (formId === "payment-reminder-form") {
+        const result = await state.store.sendPaymentReminder(
+          values.invoice_id,
+        );
+        closeModal();
+        await refreshData();
+        toast(
+          result?.created === false
+            ? "Promemoria già presente"
+            : "Notifica inviata",
+          result?.created === false
+            ? "Per questa fattura era già stato inviato un promemoria."
+            : "Il promemoria è ora visibile nell’area della famiglia.",
+        );
       } else if (formId === "settings-school-form") {
         await state.store.saveSettings(values);
         await refreshData();
@@ -5980,6 +6304,7 @@
         (event, authSession) => {
           window.setTimeout(async () => {
             if (event === "SIGNED_OUT") {
+              await stopPaymentReminderRealtime();
               state.authFingerprint = null;
               state.user = null;
               state.profile = null;

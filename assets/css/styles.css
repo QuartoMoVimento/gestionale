@@ -1898,6 +1898,14 @@ h4 {
   background: var(--info-bg);
 }
 
+.row-action:disabled,
+.row-action:disabled:hover {
+  color: var(--success);
+  background: var(--success-bg);
+  cursor: default;
+  opacity: 0.78;
+}
+
 .mobile-list {
   display: none;
 }

@@ -369,6 +369,20 @@
         payment_method: "paypal",
         paid_at: isoTime(-19, 18, 5),
       },
+      {
+        id: "inv-6",
+        family_id: "fam-1",
+        student_id: "stu-1",
+        number: "QM-2026-053",
+        title: "Quota laboratorio",
+        description: "Laboratorio musicale",
+        total_cents: 4200,
+        currency: "EUR",
+        due_date: isoDay(-8),
+        status: "overdue",
+        payment_method: null,
+        paid_at: null,
+      },
     ];
 
     const payments = [
@@ -449,6 +463,22 @@
       },
     ];
 
+    const paymentReminders = [
+      {
+        id: "payment-reminder-1",
+        invoice_id: "inv-6",
+        family_id: "fam-1",
+        sent_by: "demo-admin",
+        invoice_number: "QM-2026-053",
+        due_date: isoDay(-8),
+        outstanding_cents_at_send: 4200,
+        currency: "EUR",
+        message:
+          "Gentile famiglia, la fattura QM-2026-053 risulta ancora insoluta.",
+        sent_at: isoTime(-1, 10, 30),
+      },
+    ];
+
     return {
       families,
       familyUsers,
@@ -460,6 +490,8 @@
       invoices,
       payments,
       bankTransferNotices: [],
+      paymentReminders,
+      paymentRemindersAvailable: true,
       makeupCredits,
       settings: {
         school_name: "Studio Quarto MoVimento",

@@ -30,6 +30,7 @@ Area amministrativa:
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
+- promemoria interni alle famiglie per gli insoluti da almeno cinque giorni;
 - invito sicuro dei familiari, senza registrazione pubblica.
 
 Area famiglia:
@@ -37,6 +38,7 @@ Area famiglia:
 - calendario delle lezioni;
 - riepilogo di presenze, assenze e recuperi;
 - scadenze e pagamenti della propria famiglia;
+- promemoria di pagamento inviati dall'amministratrice, in sola lettura;
 - pagamento PayPal e coordinate per il bonifico;
 - contatto con Valeria esclusivamente via WhatsApp o prenotazione TidyCal.
 
@@ -140,7 +142,8 @@ riconciliazioni intermedie per recuperi e bonifici, `010` introduce
 annullamenti contabili tracciati e restringe la visibilità delle associazioni
 tra familiari e `011` disattiva le notifiche interne e le segnalazioni di
 bonifico inviate dalle famiglie, preservando senza modificarle le righe
-storiche.
+storiche. `012` aggiunge i promemoria di pagamento a senso unico
+amministratrice→famiglia.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
@@ -473,6 +476,21 @@ modello causale viene impostato su `{nome}, {cognome}, {numero}`. Questi valori
 hanno visibilità `authenticated`: possono essere letti da utenti che hanno
 effettuato l'accesso, ma non da visitatori anonimi. Non cambiare la visibilità
 in `public` e non inserire coordinate reali in JavaScript, README o dati demo.
+
+## Promemoria di pagamento
+
+Dalla sezione **Pagamenti** l'amministratrice può inviare manualmente un
+promemoria dal quinto giorno di calendario successivo alla scadenza. Il comando
+è disponibile soltanto se esiste ancora un saldo, la famiglia ha almeno un
+account attivo e non risultano un bonifico da riconciliare o un pagamento
+PayPal in corso.
+
+Il database ricalcola questi requisiti al momento dell'invio e consente un solo
+promemoria per fattura. La famiglia lo vede in sola lettura nella Home e nella
+sezione Pagamenti finché la quota rimane aperta; può pagare oppure usare
+**Parlane con Valeria**, ma non può rispondere tramite notifiche interne. Il
+gestionale aggiorna l'avviso in tempo reale se l'area famiglia è già aperta. Il
+promemoria resta interno: non invia e-mail, notifiche push, WhatsApp o SMS.
 
 ## Privacy e dati di minori
 
