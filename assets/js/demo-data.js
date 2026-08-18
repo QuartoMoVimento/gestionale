@@ -15,6 +15,10 @@
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   }
 
+  function isoWeekday(daysFromToday) {
+    return localDate(daysFromToday, 12, 0).getDay() || 7;
+  }
+
   function isoTime(daysFromToday, hour, minute) {
     return localDate(daysFromToday, hour, minute).toISOString();
   }
@@ -157,6 +161,10 @@
         color: "#0fa7b8",
         location: "Studio Quarto MoVimento",
         duration_minutes: 45,
+        starts_on: isoDay(-120),
+        ends_on: isoDay(240),
+        weekday: isoWeekday(0),
+        start_time: "16:30",
         is_active: true,
       },
       {
@@ -165,6 +173,10 @@
         color: "#08457c",
         location: "Studio Quarto MoVimento",
         duration_minutes: 50,
+        starts_on: isoDay(-120),
+        ends_on: isoDay(240),
+        weekday: isoWeekday(2),
+        start_time: "16:30",
         is_active: true,
       },
       {
@@ -173,6 +185,10 @@
         color: "#ff8f04",
         location: "Studio Quarto MoVimento",
         duration_minutes: 60,
+        starts_on: isoDay(-120),
+        ends_on: isoDay(240),
+        weekday: isoWeekday(0),
+        start_time: "17:30",
         is_active: true,
       },
       {
@@ -181,6 +197,10 @@
         color: "#2c9c87",
         location: "Studio Quarto MoVimento",
         duration_minutes: 50,
+        starts_on: isoDay(-120),
+        ends_on: isoDay(240),
+        weekday: isoWeekday(1),
+        start_time: "15:30",
         is_active: true,
       },
     ];
@@ -275,9 +295,11 @@
           ends_at: endsAt.toISOString(),
           lesson_type: lessonType,
           status,
-          title: lessonType === "makeup" ? "Recupero di gruppo" : course.name,
-          location: course.location,
+          title: lessonType === "makeup" ? "Recupero di gruppo" : null,
+          location: lessonType === "makeup" ? course.location : null,
           notes: "",
+          origin: lessonType === "regular" ? "course_schedule" : "manual",
+          occurrence_on: lessonType === "regular" ? isoDay(day) : null,
         };
       },
     );

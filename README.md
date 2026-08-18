@@ -26,7 +26,8 @@ Area amministrativa:
 
 - anagrafica di famiglie e allievi, inclusi codice fiscale, residenza e più
   accessi e-mail per lo stesso nucleo;
-- calendario delle lezioni ordinarie e dei recuperi;
+- corsi con periodo, giorno e ora settimanale collegati automaticamente al
+  calendario, oltre a lezioni singole e recuperi;
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
@@ -146,6 +147,9 @@ storiche. `012` aggiunge i promemoria di pagamento a senso unico
 amministratrice→famiglia. `013` separa il salvataggio degli allievi dalla
 creazione degli accessi: deduplica i nuclei per e-mail, conserva gli indirizzi
 famiglia senza creare utenti Auth e abilita la generazione manuale dei link.
+`014` rende invece ogni corso la fonte della propria programmazione
+settimanale: aggiunge inizio, fine, giorno e ora, genera le lezioni ordinarie e
+riconcilia automaticamente quelle future quando il corso cambia.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
@@ -165,6 +169,27 @@ npx supabase db push
 Non usare `db reset --linked` su produzione: è distruttivo. Non usare
 `--include-seed` sul progetto di produzione, perché i seed servono soltanto per
 sviluppo e test.
+
+### Calendario collegato ai corsi
+
+In **Impostazioni → Corsi** ogni corso può avere una programmazione composta da
+data di inizio, data di fine, giorno della settimana e ora di inizio. I quattro
+campi vanno compilati insieme; lasciandoli tutti vuoti il corso resta senza
+ricorrenza fissa.
+
+Il salvataggio passa dalla funzione database `admin_upsert_course`, che crea una
+lezione ordinaria per ogni settimana del periodo. Se periodo, giorno, ora,
+durata o stato del corso cambiano, il calendario futuro viene riallineato nella
+stessa transazione. Nome, sede e colore sono letti direttamente dal corso e
+restano quindi sempre collegati. Le date aggiunte manualmente, le prove, gli
+eventi, i recuperi, le presenze e lo storico non vengono riscritti. Una singola
+lezione generata può essere annullata, ma la sua data si modifica dal corso per
+evitare due fonti di verità.
+
+La migrazione `014` importa inizialmente anche i corsi ricorrenti già presenti:
+ricava giorno e ora dal loro nome e usa il periodo didattico configurato nelle
+impostazioni. Va applicata al database prima di pubblicare il frontend che usa
+la nuova funzione RPC.
 
 ## Configurazione Auth
 

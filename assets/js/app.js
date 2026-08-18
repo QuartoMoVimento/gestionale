@@ -580,6 +580,39 @@
     },
   };
 
+  const COURSE_WEEKDAYS = {
+    1: "Lunedì",
+    2: "Martedì",
+    3: "Mercoledì",
+    4: "Giovedì",
+    5: "Venerdì",
+    6: "Sabato",
+    7: "Domenica",
+  };
+
+  function courseScheduleConfigured(course) {
+    return Boolean(
+      course?.starts_on &&
+        course?.ends_on &&
+        course?.weekday &&
+        course?.start_time,
+    );
+  }
+
+  function courseStartTime(course) {
+    return String(course?.start_time || "").slice(0, 5);
+  }
+
+  function courseTimeRange(course) {
+    const start = courseStartTime(course);
+    const parts = start.split(":").map(Number);
+    if (parts.length !== 2 || parts.some(Number.isNaN)) return start || "—";
+    const endMinutes =
+      parts[0] * 60 + parts[1] + Number(course?.duration_minutes || 0);
+    const end = `${String(Math.floor(endMinutes / 60) % 24).padStart(2, "0")}:${String(endMinutes % 60).padStart(2, "0")}`;
+    return `${start}–${end}`;
+  }
+
   function paymentMethodLabel(method) {
     return LABELS.paymentMethod[method] || method || "metodo non indicato";
   }
@@ -802,6 +835,7 @@
       !state.data ||
       !lesson ||
       lesson.status !== "scheduled" ||
+      lesson.origin === "course_schedule" ||
       ["makeup", "recovery"].includes(lesson.lesson_type)
     ) {
       return false;
@@ -1354,6 +1388,8 @@
           title: payload.title || "",
           location: payload.location || "",
           notes: payload.notes || "",
+          origin: "manual",
+          occurrence_on: null,
         });
         cursor = addDays(cursor, 7);
         count += 1;
@@ -1443,6 +1479,107 @@
       }
     }
 
+    syncCourseCalendar(course) {
+      const now = new Date();
+      const hadManaged = this.data.lessons.some(
+        (lesson) =>
+          lesson.course_id === course.id &&
+          lesson.origin === "course_schedule",
+      );
+      const pruneFrom = hadManaged
+        ? todayKey()
+        : course.starts_on || todayKey();
+      const removableIds = new Set(
+        this.data.lessons
+          .filter(
+            (lesson) =>
+              lesson.course_id === course.id &&
+              lesson.origin === "course_schedule" &&
+              lesson.occurrence_on >= pruneFrom &&
+              new Date(lesson.starts_at) >= now &&
+              lesson.status === "scheduled" &&
+              !this.data.attendance.some(
+                (item) => item.lesson_id === lesson.id,
+              ) &&
+              !this.data.makeupCredits.some(
+                (item) =>
+                  item.source_lesson_id === lesson.id ||
+                  item.used_lesson_id === lesson.id,
+              ),
+          )
+          .map((lesson) => lesson.id),
+      );
+      this.data.lessons = this.data.lessons.filter(
+        (lesson) => !removableIds.has(lesson.id),
+      );
+
+      let created = 0;
+      if (course.is_active !== false && courseScheduleConfigured(course)) {
+        const generateFrom = hadManaged
+          ? course.starts_on > todayKey()
+            ? course.starts_on
+            : todayKey()
+          : course.starts_on;
+        let cursor = toLocalDate(generateFrom);
+        const weekday = Number(course.weekday);
+        while ((cursor.getDay() || 7) !== weekday) {
+          cursor = addDays(cursor, 1);
+        }
+        const endDate = toLocalDate(course.ends_on);
+        while (cursor <= endDate) {
+          const occurrenceOn = dateKey(cursor);
+          const startsAt = romeDateTime(
+            occurrenceOn,
+            courseStartTime(course),
+          );
+          const alreadyExists = this.data.lessons.some(
+            (lesson) =>
+              lesson.course_id === course.id &&
+              ((lesson.origin === "course_schedule" &&
+                lesson.occurrence_on === occurrenceOn) ||
+                (lesson.origin !== "course_schedule" &&
+                  lesson.starts_at === startsAt.toISOString() &&
+                  !String(lesson.status).startsWith("cancelled"))),
+          );
+          if (
+            (!hadManaged || startsAt >= now) &&
+            !alreadyExists
+          ) {
+            this.data.lessons.push({
+              id: `lesson-course-${course.id}-${occurrenceOn}`,
+              course_id: course.id,
+              starts_at: startsAt.toISOString(),
+              ends_at: new Date(
+                startsAt.getTime() + course.duration_minutes * 60000,
+              ).toISOString(),
+              lesson_type: "regular",
+              status: "scheduled",
+              title: null,
+              location: null,
+              notes: "",
+              origin: "course_schedule",
+              occurrence_on: occurrenceOn,
+            });
+            created += 1;
+          }
+          cursor = addDays(cursor, 7);
+        }
+      }
+      this.data.lessons.sort(
+        (a, b) => new Date(a.starts_at) - new Date(b.starts_at),
+      );
+      return {
+        created,
+        removed: removableIds.size,
+        calendar_lessons: this.data.lessons.filter(
+          (lesson) =>
+            lesson.course_id === course.id &&
+            lesson.origin === "course_schedule" &&
+            lesson.status === "scheduled",
+        ).length,
+      };
+    }
+
     async saveCourse(payload) {
       const course = {
         id: payload.id || `course-${Date.now()}`,
@@ -1450,12 +1587,17 @@
         color: payload.color || "#0f8f9f",
         location: payload.location || "Studio Quarto MoVimento",
         duration_minutes: Number(payload.duration_minutes || 50),
+        starts_on: payload.starts_on || null,
+        ends_on: payload.ends_on || null,
+        weekday: payload.weekday ? Number(payload.weekday) : null,
+        start_time: payload.start_time || null,
         is_active: true,
       };
       const existing = this.data.courses.find((item) => item.id === course.id);
       if (existing) Object.assign(existing, course);
       else this.data.courses.push(course);
-      return course;
+      const sync = this.syncCourseCalendar(existing || course);
+      return { course: existing || course, ...sync };
     }
 
     async archiveStudent(studentId) {
@@ -2067,16 +2209,19 @@
 
     async saveCourse(payload) {
       const values = {
+        id: payload.id || null,
         name: payload.name,
         color: payload.color || "#0f8f9f",
         location: payload.location || "Studio Quarto MoVimento",
         duration_minutes: Number(payload.duration_minutes || 50),
-        is_active: true,
+        starts_on: payload.starts_on || null,
+        ends_on: payload.ends_on || null,
+        weekday: payload.weekday ? Number(payload.weekday) : null,
+        start_time: payload.start_time || null,
       };
-      const request = payload.id
-        ? this.client.from("courses").update(values).eq("id", payload.id)
-        : this.client.from("courses").insert(values);
-      const { data, error } = await request.select().single();
+      const { data, error } = await this.client.rpc("admin_upsert_course", {
+        p_payload: values,
+      });
       if (error) throw error;
       return data;
     }
@@ -3114,7 +3259,7 @@
       ${pageHeader(
         "Programmazione",
         "Calendario lezioni",
-        "Crea lezioni singole, serie settimanali e recuperi.",
+        "Le lezioni ordinarie seguono i corsi; qui aggiungi date singole, prove, eventi e recuperi.",
         `<button class="btn btn--secondary" type="button" data-action="open-course-modal">${icon("plus", 16)} Nuovo corso</button><button class="btn btn--primary" type="button" data-action="open-lesson-modal">${icon("plus", 16)} Nuova lezione</button>`,
       )}
       <div class="calendar-layout">
@@ -3555,12 +3700,12 @@
       content = `
         <div class="setting-section">
           <div class="card-header">
-            <div><h3>Percorsi attivi</h3><p>Durata e colore usati nel calendario.</p></div>
+            <div><h3>Percorsi attivi</h3><p>Ogni programmazione genera e aggiorna automaticamente le lezioni ordinarie nel calendario.</p></div>
             <button class="btn btn--primary btn--sm" type="button" data-action="open-course-modal">${icon("plus", 14)} Nuovo corso</button>
           </div>
           <div class="table-wrap">
             <table class="data-table">
-              <thead><tr><th>Corso</th><th>Durata</th><th>Sede</th><th>Iscritti</th><th></th></tr></thead>
+              <thead><tr><th>Corso</th><th>Programmazione</th><th>Durata</th><th>Sede</th><th>Iscritti</th><th></th></tr></thead>
               <tbody>
                 ${state.data.courses
                   .filter((course) => course.is_active !== false)
@@ -3570,7 +3715,10 @@
                         item.course_id === course.id &&
                         item.is_active !== false,
                     ).length;
-                    return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
+                    const schedule = courseScheduleConfigured(course)
+                      ? `<strong>${escapeHTML(COURSE_WEEKDAYS[course.weekday] || "—")} · ${escapeHTML(courseTimeRange(course))}</strong><br><span class="subtle">${escapeHTML(formatDate(course.starts_on))}–${escapeHTML(formatDate(course.ends_on))}</span>`
+                      : `<span class="badge badge--warning">Da configurare</span>`;
+                    return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${schedule}</td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
                   })
                   .join("")}
               </tbody>
@@ -4473,7 +4621,8 @@
         defaultType === "makeup" || defaultType === "recovery"
           ? "Nuova sessione di recupero"
           : "Nuova lezione",
-      subtitle: "Puoi creare una data singola o una serie settimanale.",
+      subtitle:
+        "Qui aggiungi una data singola. Le serie ordinarie si gestiscono dalle impostazioni del corso.",
       className: "modal--lg",
       body: `
         <form id="lesson-form">
@@ -4485,8 +4634,6 @@
             <div class="field"><label for="lesson-duration">Durata (minuti)</label><input class="input" id="lesson-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(defaultCourse?.duration_minutes || 50)}" required /></div>
             <div class="field field--full"><label for="lesson-title">Titolo personalizzato</label><input class="input" id="lesson-title" name="title" placeholder="Facoltativo: se vuoto usa il nome del corso" /></div>
             <div class="field field--full"><label for="lesson-location">Sede</label><input class="input" id="lesson-location" name="location" value="${escapeHTML(defaultCourse?.location || state.data.settings.school_address || "Studio Quarto MoVimento")}" /></div>
-            <div class="field field--full"><label class="checkbox"><input type="checkbox" name="repeat_weekly" value="yes" /> Ripeti ogni settimana fino alla data indicata</label></div>
-            <div class="field"><label for="lesson-repeat-until">Ripeti fino al</label><input class="input" id="lesson-repeat-until" name="repeat_until" type="date" value="${escapeHTML(state.data.settings.academic_year_end || "")}" /></div>
             <div class="field"><label for="lesson-notes">Nota sulla lezione</label><input class="input" id="lesson-notes" name="notes" placeholder="Visibile anche alle famiglie iscritte" /></div>
           </div>
         </form>
@@ -4566,7 +4713,9 @@
     if (!canRescheduleLesson(lesson)) {
       toast(
         "Lezione non modificabile",
-        "Ha già presenze registrate o recuperi collegati. Annullala e crea una nuova data.",
+        lesson.origin === "course_schedule"
+          ? "È generata dal corso: modifica giorno, ora o periodo nelle impostazioni del corso."
+          : "Ha già presenze registrate o recuperi collegati. Annullala e crea una nuova data.",
         "warning",
       );
       return;
@@ -4635,6 +4784,7 @@
     const course = courseForLesson(lesson);
     const students = studentsForLesson(lesson);
     const isRecovery = ["makeup", "recovery"].includes(lesson.lesson_type);
+    const managedByCourse = lesson.origin === "course_schedule";
     const recoveryCompletionReady =
       !isRecovery ||
       (students.length > 0 &&
@@ -4644,6 +4794,7 @@
         }));
     const rescheduleBlocked =
       !isRecovery &&
+      !managedByCourse &&
       lesson.status === "scheduled" &&
       !canRescheduleLesson(lesson);
     openModal({
@@ -4659,13 +4810,14 @@
         ${lesson.notes ? `<div class="setting-section"><h3>Nota sulla lezione</h3><p class="muted">${escapeHTML(lesson.notes)}</p></div>` : ""}
         ${lesson.cancellation_reason ? `<div class="setting-section"><h3>Motivo annullamento</h3><p class="muted">${escapeHTML(lesson.cancellation_reason)}</p></div>` : ""}
         ${isRecovery && !recoveryCompletionReady ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Registra la presenza o l’assenza di tutti gli allievi assegnati prima di segnare il recupero come svolto.</p></div>` : ""}
+        ${managedByCourse ? `<div class="info-callout" style="margin-top:16px">${icon("repeat", 17)}<p><strong>Generata automaticamente dal corso.</strong> Per cambiare giorno, ora, durata o periodo modifica la programmazione del corso; il calendario futuro si aggiornerà insieme.</p></div>` : ""}
         ${rescheduleBlocked ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Questa lezione ha già presenze o recuperi collegati: per cambiare data, annullala e creane una nuova.</p></div>` : ""}
       `,
       footer: `
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
         ${
           lesson.status === "scheduled"
-            ? `${!isRecovery && !rescheduleBlocked ? `<button class="btn btn--secondary" type="button" data-action="edit-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${icon("edit", 15)} Modifica</button>` : ""}<button class="btn btn--danger" type="button" data-action="open-cancel-lesson" data-lesson-id="${escapeHTML(lesson.id)}">Annulla lezione</button>${recoveryCompletionReady ? `<button class="btn btn--primary" type="button" data-action="update-lesson-status" data-lesson-id="${escapeHTML(lesson.id)}" data-status="completed">${icon("checkSimple", 15)} Segna svolta</button>` : ""}`
+            ? `${managedByCourse ? `<button class="btn btn--secondary" type="button" data-action="edit-course" data-course-id="${escapeHTML(course?.id || "")}">${icon("edit", 15)} Modifica corso</button>` : !isRecovery && !rescheduleBlocked ? `<button class="btn btn--secondary" type="button" data-action="edit-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${icon("edit", 15)} Modifica</button>` : ""}<button class="btn btn--danger" type="button" data-action="open-cancel-lesson" data-lesson-id="${escapeHTML(lesson.id)}">Annulla lezione</button>${recoveryCompletionReady ? `<button class="btn btn--primary" type="button" data-action="update-lesson-status" data-lesson-id="${escapeHTML(lesson.id)}" data-status="completed">${icon("checkSimple", 15)} Segna svolta</button>` : ""}`
             : ""
         }
       `,
@@ -4676,22 +4828,49 @@
     const course = courseId
       ? state.data.courses.find((item) => item.id === courseId)
       : null;
+    const startsOn = course
+      ? course.starts_on || ""
+      : state.data.settings.academic_year_start || todayKey();
+    const endsOn = course
+      ? course.ends_on || ""
+      : state.data.settings.academic_year_end || "";
+    const defaultWeekday = startsOn
+      ? toLocalDate(startsOn).getDay() || 7
+      : "";
+    const weekday = course ? course.weekday || "" : defaultWeekday;
+    const startTime = course ? courseStartTime(course) : "16:30";
     openModal({
       title: course ? `Modifica ${course.name}` : "Nuovo corso",
-      subtitle: "Questi dati vengono usati in calendario e nelle iscrizioni.",
-      className: "modal--sm",
+      subtitle: "Il corso e il suo calendario restano sempre sincronizzati.",
+      className: "modal--lg",
       body: `
         <form id="course-form">
           <input type="hidden" name="id" value="${escapeHTML(course?.id || "")}" />
           <div class="form-grid">
             <div class="field field--full"><label for="course-name">Nome del corso</label><input class="input" id="course-name" name="name" value="${escapeHTML(course?.name || "")}" required /></div>
-            <div class="field"><label for="course-duration">Durata (minuti)</label><input class="input" id="course-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(course?.duration_minutes || 50)}" required /></div>
+            <div class="field"><label for="course-duration">Durata della lezione (minuti)</label><input class="input" id="course-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(course?.duration_minutes || 50)}" required /></div>
             <div class="field"><label for="course-color">Colore calendario</label><input class="input" id="course-color" name="color" type="color" value="${safeColor(course?.color)}" /></div>
             <div class="field field--full"><label for="course-location">Sede</label><input class="input" id="course-location" name="location" value="${escapeHTML(course?.location || state.data.settings.school_address || "Studio Quarto MoVimento")}" /></div>
           </div>
+          <div class="setting-section" style="margin-top:24px;padding-top:24px;border-top:1px solid var(--line)">
+            <h3>Programmazione del corso</h3>
+            <p>Il gestionale crea una lezione ogni settimana nel periodo indicato. Per un corso senza ricorrenza fissa lascia vuoti tutti e quattro i campi.</p>
+            <div class="form-grid">
+              <div class="field"><label for="course-starts-on">Inizio corso</label><input class="input" id="course-starts-on" name="starts_on" type="date" value="${escapeHTML(startsOn)}" /></div>
+              <div class="field"><label for="course-ends-on">Fine corso</label><input class="input" id="course-ends-on" name="ends_on" type="date" value="${escapeHTML(endsOn)}" /></div>
+              <div class="field"><label for="course-weekday">Giorno della lezione</label><select class="select" id="course-weekday" name="weekday"><option value="">Nessun giorno fisso</option>${Object.entries(COURSE_WEEKDAYS)
+                .map(
+                  ([value, label]) =>
+                    `<option value="${value}"${Number(weekday) === Number(value) ? " selected" : ""}>${escapeHTML(label)}</option>`,
+                )
+                .join("")}</select></div>
+              <div class="field"><label for="course-start-time">Ora di inizio</label><input class="input" id="course-start-time" name="start_time" type="time" value="${escapeHTML(startTime)}" /></div>
+            </div>
+            <div class="info-callout" style="margin-top:16px">${icon("repeat", 17)}<p><strong>Calendario automatico.</strong> Modificando periodo, giorno, ora o durata verranno riallineate tutte le lezioni future generate dal corso. Presenze, recuperi e date aggiunte manualmente non saranno toccati.</p></div>
+          </div>
         </form>
       `,
-      footer: `${course ? `<button class="btn btn--danger" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}">${icon("trash", 15)} Elimina corso</button>` : ""}<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="course-form">${course ? "Salva" : "Aggiungi corso"}</button>`,
+      footer: `${course ? `<button class="btn btn--danger" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}">${icon("trash", 15)} Elimina corso</button>` : ""}<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="course-form">${course ? "Salva e aggiorna calendario" : "Aggiungi e crea calendario"}</button>`,
     });
   }
 
@@ -6060,6 +6239,8 @@
       await handleGenerateFamilyLinkAction(actionTarget);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
+    } else if (action === "edit-course") {
+      openCourseModal(actionTarget.dataset.courseId);
     } else if (action === "edit-lesson") {
       openEditLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "mark-invoice-paid") {
@@ -6262,22 +6443,13 @@
         if (Number.isNaN(start.getTime())) {
           throw new Error("Data o ora della lezione non valida.");
         }
-        if (
-          values.repeat_weekly === "yes" &&
-          (!values.repeat_until || values.repeat_until < values.date)
-        ) {
-          throw new Error(
-            "Per la serie settimanale scegli una data finale uguale o successiva alla prima lezione.",
-          );
-        }
         const course = state.data.courses.find(
           (item) => item.id === values.course_id,
         );
         await state.store.saveLesson({
           ...values,
           starts_at: start.toISOString(),
-          repeat_until:
-            values.repeat_weekly === "yes" ? values.repeat_until : null,
+          repeat_until: null,
           title: values.title || course?.name || "Lezione",
         });
         state.calendarMonth = startOfMonth(start);
@@ -6286,9 +6458,7 @@
         await refreshData();
         toast(
           "Lezione creata",
-          values.repeat_weekly === "yes"
-            ? "È stata aggiunta la serie settimanale."
-              : "La data è ora nel calendario.",
+          "La data è ora nel calendario. Le serie ordinarie restano collegate al corso.",
         );
       } else if (formId === "edit-lesson-form") {
         const start = romeDateTime(values.date, values.time);
@@ -6308,10 +6478,45 @@
           "La nuova data e le informazioni sono visibili alle famiglie.",
         );
       } else if (formId === "course-form") {
-        await state.store.saveCourse(values);
+        const scheduleValues = [
+          values.starts_on,
+          values.ends_on,
+          values.weekday,
+          values.start_time,
+        ];
+        const completedScheduleFields = scheduleValues.filter(Boolean).length;
+        if (![0, 4].includes(completedScheduleFields)) {
+          throw new Error(
+            "Per il calendario automatico compila insieme inizio, fine, giorno e ora.",
+          );
+        }
+        if (completedScheduleFields === 4) {
+          const startsOn = toLocalDate(values.starts_on);
+          const endsOn = toLocalDate(values.ends_on);
+          const durationDays = Math.round(
+            (endsOn.getTime() - startsOn.getTime()) / 86400000,
+          );
+          if (Number.isNaN(durationDays) || durationDays < 0) {
+            throw new Error(
+              "La data di fine del corso deve essere successiva all’inizio.",
+            );
+          }
+          if (durationDays > 731) {
+            throw new Error("Il periodo del corso non può superare due anni.");
+          }
+          if (!COURSE_WEEKDAYS[Number(values.weekday)]) {
+            throw new Error("Scegli un giorno valido per la lezione.");
+          }
+        }
+        const result = await state.store.saveCourse(values);
         closeModal();
         await refreshData();
-        toast("Corso salvato", "Il percorso è disponibile nel calendario.");
+        toast(
+          "Corso e calendario aggiornati",
+          completedScheduleFields === 4
+            ? `${Number(result?.calendar_lessons || 0)} lezioni ordinarie sono collegate a questo corso.`
+            : "Il corso è salvato senza una programmazione settimanale fissa.",
+        );
       } else if (formId === "assign-makeup-form") {
         await state.store.assignMakeup(values.credit_id, values.lesson_id);
         closeModal();
