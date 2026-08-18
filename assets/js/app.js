@@ -438,6 +438,12 @@
     `;
   }
 
+  function whatsappUrl(message) {
+    const url = new URL(WHATSAPP_URL);
+    url.searchParams.set("text", String(message || ""));
+    return url.toString();
+  }
+
   const LABELS = {
     plan: {
       trial: "Lezione di prova",
@@ -3527,6 +3533,11 @@
 
   function renderFamilyAttendance() {
     const student = getSelectedStudent();
+    const absenceWhatsappUrl = whatsappUrl(
+      student
+        ? `Ciao Valeria, vorrei comunicare l’assenza di ${fullName(student)}.`
+        : "Ciao Valeria, vorrei comunicare un’assenza.",
+    );
     const stats = studentAttendanceStats(student?.id);
     const records = state.data.attendance
       .filter((item) => item.student_id === student?.id)
@@ -3575,7 +3586,10 @@
         <article class="card card--tinted-yellow">
           <header class="card-header"><div><h2>Come funzionano le assenze?</h2><p>La regola del tuo piano</p></div></header>
           <p class="muted" style="font-size:12px">Comunica l’assenza almeno <strong>${escapeHTML(state.data.settings.absence_notice_hours ?? 24)} ore prima per poter organizzare il recupero</strong>. Il piano mensile non prevede che le assenze vengano riconosciute sotto forma di credito; i piani trimestrali e annuali possono maturare recuperi. Per maggiori dettagli consulta il regolamento.</p>
-          <a href="https://drive.google.com/file/d/1GnFRybVlJXnCPzXfwIK7jK5V45eLvrS1/view?usp=drive_link" target="_blank" rel="noopener noreferrer" class="btn btn--secondary btn--sm">Leggi il regolamento ${icon("arrowRight", 14)}</a>
+          <div class="support-actions" style="margin-top:14px">
+            <a href="${escapeHTML(absenceWhatsappUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn--primary btn--sm">${icon("calendar", 14)} Comunica la tua assenza</a>
+            <a href="https://drive.google.com/file/d/1GnFRybVlJXnCPzXfwIK7jK5V45eLvrS1/view?usp=drive_link" target="_blank" rel="noopener noreferrer" class="btn btn--secondary btn--sm">Leggi il regolamento ${icon("arrowRight", 14)}</a>
+          </div>
         </article>
       </section>
 
