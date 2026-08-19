@@ -1259,6 +1259,26 @@ function schoolClosuresForStudent(studentId) {
     `;
   }
 
+  // Le date scelte dall'amministratrice sono giorni "civili": le fissiamo a
+  // mezzogiorno locale così il timestamp resta sullo stesso giorno anche
+  // quando viene riletto in fuso Europe/Rome.
+  function paymentPaidAtISO(paidOn) {
+    if (!paidOn) return new Date().toISOString();
+    const date = toLocalDate(paidOn);
+    if (Number.isNaN(date.getTime())) return new Date().toISOString();
+    return date.toISOString();
+  }
+
+  // PostgREST segnala una RPC assente ora come "does not exist" ora come
+  // "Could not find the function ... in the schema cache".
+  function isMissingFunctionError(error, functionName) {
+    const message = error?.message || "";
+    if (functionName && !message.includes(functionName)) return false;
+    return /does not exist|non esiste|could not find|schema cache/i.test(
+      message,
+    );
+  }
+
   class DemoStore {
     constructor() {
       this.data = window.QM_DEMO.createDemoData();
@@ -2033,11 +2053,12 @@ function schoolClosuresForStudent(studentId) {
       return invoice;
     }
 
-    async markInvoicePaid(invoiceId, method) {
+    async markInvoicePaid(invoiceId, method, paidOn) {
       const invoice = this.data.invoices.find((item) => item.id === invoiceId);
       if (!invoice) throw new Error("Scadenza non trovata.");
       const outstanding = invoiceOutstandingCents(invoice);
       if (outstanding <= 0) return;
+      const paidAt = paymentPaidAtISO(paidOn);
       this.data.payments.push({
         id: `pay-${Date.now()}`,
         invoice_id: invoice.id,
@@ -2049,12 +2070,12 @@ function schoolClosuresForStudent(studentId) {
         status: "completed",
         provider: "manual",
         reference: "Registrato dall’amministratrice",
-        paid_at: new Date().toISOString(),
+        paid_at: paidAt,
         created_at: new Date().toISOString(),
       });
       invoice.status = "paid";
       invoice.payment_method = method || "bank_transfer";
-      invoice.paid_at = new Date().toISOString();
+      invoice.paid_at = paidAt;
     }
 
     async voidInvoice(invoiceId, reason) {
@@ -2660,19 +2681,23 @@ function schoolClosuresForStudent(studentId) {
       return data;
     }
 
-    async markInvoicePaid(invoiceId, method) {
+    async markInvoicePaid(invoiceId, method, paidOn) {
+      const paidAt = paymentPaidAtISO(paidOn);
       const { data, error } = await this.client.rpc("admin_mark_invoice_paid", {
         p_invoice_id: invoiceId,
         p_method: method || "bank_transfer",
+        p_paid_at: paidAt,
       });
       if (!error) return data;
-      if (!/function .* does not exist/i.test(error.message || "")) throw error;
+      if (!isMissingFunctionError(error, "admin_mark_invoice_paid")) {
+        throw error;
+      }
       const { error: updateError } = await this.client
         .from("invoices")
         .update({
           status: "paid",
           payment_method: method || "bank_transfer",
-          paid_at: new Date().toISOString(),
+          paid_at: paidAt,
         })
         .eq("id", invoiceId);
       if (updateError) throw updateError;
@@ -5953,7 +5978,8 @@ if (automaticClosure) {
       body: `
         <form id="mark-paid-form">
           <input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />
-          <div class="field"><label for="paid-method">Metodo ricevuto</label><select class="select" id="paid-method" name="method"><option value="bank_transfer">Bonifico bancario</option><option value="cash">Contanti</option><option value="other">Altro</option></select></div>
+          <div class="field"><label for="paid-method">Metodo ricevuto</label><select class="select" id="paid-method" name="method"><option value="bank_transfer">Bonifico</option><option value="paypal">PayPal</option><option value="cash">Contanti</option></select></div>
+          <div class="field" style="margin-top:14px"><label for="paid-date">Data del pagamento</label><input class="input" id="paid-date" name="paid_on" type="date" value="${escapeHTML(todayKey())}" max="${escapeHTML(todayKey())}" required /><p class="field-hint">Indica il giorno in cui il denaro è stato incassato.</p></div>
           <div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Usa questa conferma solo dopo aver verificato che il denaro sia stato effettivamente ricevuto.</p></div>
         </form>
       `,
@@ -7606,13 +7632,24 @@ if (automaticClosure) {
           "Il saldo è stato ricalcolato e il movimento resta nello storico.",
         );
       } else if (formId === "mark-paid-form") {
+        const paidOn = String(values.paid_on || "").trim();
+        if (!paidOn) {
+          throw new Error("Indica la data in cui è avvenuto il pagamento.");
+        }
+        if (paidOn > todayKey()) {
+          throw new Error("La data del pagamento non può essere futura.");
+        }
         await state.store.markInvoicePaid(
           values.invoice_id,
           values.method,
+          paidOn,
         );
         closeModal();
         await refreshData();
-        toast("Incasso registrato", "La scadenza risulta pagata.");
+        toast(
+          "Incasso registrato",
+          `La scadenza risulta pagata il ${formatDate(paidOn)} via ${paymentMethodLabel(values.method)}.`,
+        );
       } else if (formId === "payment-reminder-form") {
         const result = await state.store.sendPaymentReminder(
           values.invoice_id,

@@ -156,7 +156,11 @@ aggiunge le chiusure per festività come date autonome, visibili anche alle
 famiglie: le occorrenze ordinarie interessate vengono escluse senza presenze,
 crediti di recupero o modifica delle altre lezioni. `016` converte nello stesso
 formato le festività future che erano già state registrate annullando singole
-lezioni.
+lezioni. `017` completa la conferma manuale degli incassi: i metodi ammessi
+diventano bonifico, PayPal e contanti e la data in cui il pagamento è avvenuto
+viene registrata su `payments.paid_at` invece di essere sempre quella della
+conferma. Va applicata prima di pubblicare il frontend che invia il nuovo
+parametro `p_paid_at`.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
