@@ -2285,9 +2285,12 @@ function schoolClosuresForStudent(studentId) {
         }
         return {
           ok: true,
+          target_email: email,
           account_status: "active",
           account_active: true,
-          link_generated: false,
+          link_generated: true,
+          activation_link: `https://demo.quartomovimento.it/?token_hash=${Date.now()}&type=magiclink`,
+          activation_link_type: "magiclink",
         };
       }
       if (!existing) {
@@ -2310,10 +2313,12 @@ function schoolClosuresForStudent(studentId) {
       return {
         demo: true,
         ok: true,
+        target_email: email,
         account_status: "pending",
         account_active: false,
         link_generated: true,
         activation_link: `https://demo.quartomovimento.it/invito/${encodeURIComponent(email)}?token=${Date.now()}`,
+        activation_link_type: "invite",
       };
     }
   }
@@ -2858,11 +2863,11 @@ function schoolClosuresForStudent(studentId) {
       if (
         normalizeEmailList([data.target_email])[0] !== requestedEmail ||
         !["active", "pending"].includes(data.account_status) ||
-        (data.account_status !== "active" &&
-          (!data.link_generated || !data.activation_link))
+        !data.link_generated ||
+        !data.activation_link
       ) {
         const error = new Error(
-          "Supabase non ha restituito un link di invito valido.",
+          "Non è stato possibile preparare la mail di benvenuto.",
         );
         error.code = "invalid_edge_response";
         throw error;
@@ -2879,7 +2884,7 @@ function schoolClosuresForStudent(studentId) {
           ${brandLockup("full")}
           <div class="login-panel__content">
             <span class="login-eyebrow">Area riservata</span>
-            <h1 class="login-title">Bentornata!</h1>
+            <h1 class="login-title">Benvenut@!</h1>
             <p class="login-subtitle">Lezioni, presenze, recuperi e pagamenti: tutto al posto giusto, con un solo accesso.</p>
             ${message ? `<div class="info-callout" style="margin-bottom:18px">${icon("info", 18)}<p>${escapeHTML(message)}</p></div>` : ""}
             <form class="login-form" id="login-form">
@@ -5282,7 +5287,7 @@ function schoolClosuresForStudent(studentId) {
       title: student ? `Modifica ${fullName(student)}` : "Nuovo allievo",
       subtitle: student
         ? "Aggiorna anagrafica, corso e piano."
-        : "Aggiungi l’allievo; il link famiglia si genera poi dalla sua scheda.",
+        : "Aggiungi l’allievo; la mail di benvenuto si prepara poi dalla sua scheda.",
       className: "modal--lg",
       body: `
         <form id="student-form">
@@ -5314,8 +5319,8 @@ function schoolClosuresForStudent(studentId) {
               <div class="field"><label for="family-display-name">Nome famiglia</label><input class="input" id="family-display-name" name="family_display_name" value="${escapeHTML(family?.display_name || "")}" placeholder="Es. Famiglia Bianchi" /></div>
               <div class="field"><label for="guardian-email">E-mail principale</label><input class="input" id="guardian-email" name="email" type="email" value="${escapeHTML(family?.email || "")}" required /></div>
               <div class="field"><label for="guardian-phone">Telefono</label><input class="input" id="guardian-phone" name="phone" type="tel" value="${escapeHTML(family?.phone || "")}" /></div>
-              ${linkedEmails.length ? `<div class="field field--full"><label>Account già collegati</label><p class="field-hint">${linkedEmails.map((email) => escapeHTML(email)).join(" · ")}</p></div>` : `<div class="field field--full"><p class="field-hint">Dopo il salvataggio potrai generare manualmente il link dalla scheda dell’allievo.</p></div>`}
-              <div class="field field--full"><label for="guardian-additional-emails">Altre e-mail di accesso</label><textarea class="textarea" id="guardian-additional-emails" name="additional_emails" rows="3" placeholder="Un indirizzo per riga, oppure separati da virgola">${escapeHTML(additionalEmails.join("\n"))}</textarea><p class="field-hint">Puoi indicare fino a 10 indirizzi aggiuntivi. Nessuna e-mail viene inviata automaticamente.</p></div>
+              ${linkedEmails.length ? `<div class="field field--full"><label>Account già collegati</label><p class="field-hint">${linkedEmails.map((email) => escapeHTML(email)).join(" · ")}</p></div>` : `<div class="field field--full"><p class="field-hint">Dopo il salvataggio potrai preparare la mail di benvenuto dalla scheda dell’allievo.</p></div>`}
+              <div class="field field--full"><label for="guardian-additional-emails">Altre e-mail di accesso</label><textarea class="textarea" id="guardian-additional-emails" name="additional_emails" rows="3" placeholder="Un indirizzo per riga, oppure separati da virgola">${escapeHTML(additionalEmails.join("\n"))}</textarea><p class="field-hint">Puoi indicare fino a 10 indirizzi aggiuntivi. Le mail di benvenuto vengono preparate dalla scheda dell’allievo e inviate manualmente dalla tua posta.</p></div>
             </div>
           </div>
           <div class="setting-section">
@@ -5360,8 +5365,8 @@ function schoolClosuresForStudent(studentId) {
       return {
         label: "Account attivo",
         badgeClass: "badge--success",
-        canGenerate: false,
-        buttonLabel: "",
+        canGenerate: true,
+        buttonLabel: "Invia la mail di benvenuto",
       };
     }
     if (status === "pending") {
@@ -5369,7 +5374,7 @@ function schoolClosuresForStudent(studentId) {
         label: "In attesa di attivazione",
         badgeClass: "badge--warning",
         canGenerate: true,
-        buttonLabel: "Genera nuovo link",
+        buttonLabel: "Invia la mail di benvenuto",
       };
     }
     if (status === "disabled") {
@@ -5392,7 +5397,7 @@ function schoolClosuresForStudent(studentId) {
       label: status === "error" ? "Stato non disponibile" : "Account da attivare",
       badgeClass: status === "error" ? "badge--danger" : "badge--plain",
       canGenerate: true,
-      buttonLabel: "Genera link di invito",
+      buttonLabel: "Invia la mail di benvenuto",
     };
   }
 
@@ -5447,7 +5452,7 @@ function schoolClosuresForStudent(studentId) {
         <div class="setting-section">
           <h3>Contatti famiglia</h3>
           <p>${escapeHTML(family?.display_name || "")}</p>
-          ${statusError ? `<div class="info-callout" style="margin-bottom:12px">${icon("alert", 18)}<p>Non è stato possibile verificare lo stato degli account. Puoi riprovare a generare il link; se il problema continua, controlla il deploy della funzione.</p></div>` : ""}
+          ${statusError ? `<div class="info-callout" style="margin-bottom:12px">${icon("alert", 18)}<p>Non è stato possibile verificare lo stato degli account. Puoi riprovare a preparare la mail di benvenuto; se il problema continua, controlla il deploy della funzione.</p></div>` : ""}
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.guardian_name || "—")}</strong><span>Genitore o tutore</span></span></div>
             ${accessEmails.length
@@ -5459,7 +5464,7 @@ function schoolClosuresForStudent(studentId) {
                       const presentation = familyAccountStatusPresentation(
                         familyAccountStatus(family.id, email),
                       );
-                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--secondary btn--sm" type="button" data-action="generate-family-link" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}">${icon("copy", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
+                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--primary btn--sm" type="button" data-action="prepare-family-welcome-email" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" data-family-display-name="${escapeHTML(family.display_name || family.guardian_name || "")}">${icon("mail", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
                     },
                   )
                   .join("")
@@ -6259,6 +6264,82 @@ if (automaticClosure) {
     return url.toString();
   }
 
+  const AUTH_TICKET_TYPES = new Set([
+    "invite",
+    "recovery",
+    "magiclink",
+    "signup",
+    "email_change",
+    "email",
+  ]);
+  const AUTH_URL_KEYS = [
+    "token_hash",
+    "token",
+    "type",
+    "error",
+    "error_code",
+    "error_description",
+  ];
+
+  // I parametri di autenticazione arrivano nel frammento (invito manuale e
+  // redirect impliciti di Supabase) oppure nella query: si leggono entrambi.
+  function authUrlParam(key) {
+    const rawHash = window.location.hash.replace(/^#/, "");
+    if (rawHash && !rawHash.startsWith("/")) {
+      const fromHash = new URLSearchParams(rawHash).get(key);
+      if (fromHash) return fromHash;
+    }
+    return new URLSearchParams(window.location.search).get(key) || "";
+  }
+
+  function readAuthTicket() {
+    const tokenHash = authUrlParam("token_hash");
+    const type = authUrlParam("type") || "invite";
+    if (!tokenHash || !AUTH_TICKET_TYPES.has(type)) return null;
+    return { tokenHash, type };
+  }
+
+  function readAuthRedirectError() {
+    const code = authUrlParam("error_code");
+    const description = authUrlParam("error_description");
+    const error = authUrlParam("error");
+    if (!code && !description && !error) return null;
+    return { code, description, error };
+  }
+
+  function clearAuthTicketFromUrl(needsPassword) {
+    const url = new URL(window.location.href);
+    AUTH_URL_KEYS.forEach((key) => url.searchParams.delete(key));
+    url.hash = needsPassword ? "#/set-password" : "";
+    window.history.replaceState(
+      null,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }
+
+  function authLinkFailureMessage(details) {
+    const code = String(details?.code || details?.error || "").toLowerCase();
+    const description = String(details?.description || details?.message || "");
+    if (
+      code === "otp_expired" ||
+      code === "access_denied" ||
+      /expired|invalid|already been used/i.test(description)
+    ) {
+      return "Questo link di accesso non è più valido: è scaduto oppure è già stato aperto una volta. Chiedi all’amministratrice di generarne uno nuovo.";
+    }
+    if (code === "over_email_send_rate_limit" || details?.status === 429) {
+      return "Troppi tentativi ravvicinati. Attendi qualche minuto e riapri il link.";
+    }
+    if (code === "user_banned") {
+      return "Questo account è disattivato. Contatta l’amministratrice.";
+    }
+    return (
+      description ||
+      "Il link è scaduto o non valido. Richiedine uno nuovo."
+    );
+  }
+
   function replaceAppRoute(hash, clearAuthParams) {
     const url = new URL(window.location.href);
     if (clearAuthParams) {
@@ -6816,7 +6897,7 @@ if (automaticClosure) {
     return copied;
   }
 
-  async function copyInvitationLink(actionTarget) {
+  async function copyWelcomeEmailLink(actionTarget) {
     const copied = await copyTextToClipboard(actionTarget.dataset.value || "");
     if (!copied) {
       toast(
@@ -6826,9 +6907,12 @@ if (automaticClosure) {
       );
       return;
     }
-    actionTarget.innerHTML = `${icon("checkSimple", 15)} Link copiato`;
-    actionTarget.setAttribute("aria-label", "Link copiato");
-    toast("Link copiato", "Ora puoi inviarlo personalmente al genitore.");
+    actionTarget.innerHTML = `${icon("checkSimple", 15)} Collegamento copiato`;
+    actionTarget.setAttribute("aria-label", "Collegamento copiato");
+    toast(
+      "Collegamento copiato",
+      "Ora puoi inserirlo nella mail di benvenuto.",
+    );
   }
 
   function isValidActivationLink(value) {
@@ -6840,73 +6924,138 @@ if (automaticClosure) {
     }
   }
 
-  function openManualInvitationLink(link, email, context) {
+  function familyWelcomeEmailSubject() {
+    return "Benvenuto in Quarto MoVimento - Area riservata";
+  }
+
+  function familyWelcomeEmailBody(link, details = {}) {
+    const rawName = details.guardianName || details.familyDisplayName || "famiglia";
+    const familyName = rawName.trim() || "famiglia";
+    return [
+      `Benvenut@ ${familyName},`,
+      "",
+      "questa è la mail che contiene il link di accesso all’area riservata dei corsi di Quarto MoVimento.",
+      "",
+      "Da qui potrai verificare tutti i dati relativi a pagamenti, presenze e assenze.",
+      "",
+      "Accedi qui:",
+      link,
+      "",
+      "Per tenere l’area riservata sempre a portata di mano:",
+      "- Android: apri il link nel browser, poi seleziona Menu > Aggiungi alla schermata Home > Aggiungi.",
+      "- iPhone: apri il link in Safari, poi Condividi > Aggiungi alla schermata Home > Aggiungi.",
+      "- PC: apri il sito nel browser, poi salva la pagina ai Preferiti o aggiungila alla barra dei collegamenti.",
+      "",
+      "Il link è personale e destinato alla tua famiglia.",
+      "",
+      "Se non hai richiesto questo accesso, puoi ignorare questa email.",
+      "",
+      "Valeria",
+      "Quarto MoVimento",
+    ].join("\n");
+  }
+
+  function buildFamilyWelcomeMailto(email, link, details = {}) {
+    const subject = encodeURIComponent(familyWelcomeEmailSubject());
+    const body = encodeURIComponent(
+      familyWelcomeEmailBody(link, details),
+    );
+    return `mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`;
+  }
+
+  async function sendWelcomeEmail(actionTarget) {
+    const email = normalizeEmailList([actionTarget.dataset.email])[0] || "";
+    const link = actionTarget.dataset.value || "";
+    if (!email || !link) {
+      toast(
+        "Mail non pronta",
+        "Prepara prima la mail di benvenuto per questa famiglia.",
+        "error",
+      );
+      return;
+    }
+    const mailto = buildFamilyWelcomeMailto(email, link, {
+      guardianName: actionTarget.dataset.guardianName || "",
+      familyDisplayName: actionTarget.dataset.familyDisplayName || "",
+    });
+    window.location.href = mailto;
+    toast(
+      "Mail pronta da inviare",
+      "Il messaggio è aperto nella tua posta: controllalo e premi Invia.",
+      "success",
+    );
+  }
+
+  function openWelcomeEmailModal(link, email, context) {
     const details = context || {};
+    const accountActive = details.accountActive === true;
     openModal({
-      title: "Link di invito pronto",
-      subtitle: "Nessuna e-mail è stata inviata automaticamente.",
+      title: "Mail di benvenuto pronta",
+      subtitle: "Il messaggio non è stato ancora inviato: puoi aprirlo nella tua posta oppure copiare il collegamento.",
       className: "modal--sm",
       body: `
-        <div class="info-callout">${icon("info", 18)}<p>Link personale per <strong>${escapeHTML(email)}</strong>. Copialo e condividilo direttamente con il genitore; il link è temporaneo.</p></div>
-        <div class="field" style="margin-top:16px"><label for="manual-invite-link">Link di invito</label><input class="input" id="manual-invite-link" value="${escapeHTML(link)}" readonly spellcheck="false" /></div>
+        <div class="info-callout">${icon("info", 18)}<p>${accountActive ? "L’account è già attivo: questo nuovo link permette al parente di accedere senza modificare la password." : "Questo link permette al parente di attivare il proprio accesso e scegliere una password."} Il link è personale per <strong>${escapeHTML(email)}</strong>, vale 24 ore e si usa una volta sola. Se ne generi un altro, quello precedente smette di funzionare.</p></div>
+        <div class="field" style="margin-top:16px"><label for="welcome-email-link">Collegamento inserito nella mail</label><input class="input" id="welcome-email-link" value="${escapeHTML(link)}" readonly spellcheck="false" /></div>
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--secondary" type="button" data-action="generate-family-link" data-family-id="${escapeHTML(details.familyId || "")}" data-student-id="${escapeHTML(details.studentId || "")}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(details.guardianName || "")}">${icon("repeat", 15)} Genera nuovo link</button><button class="btn btn--primary" type="button" data-action="copy-invitation-link" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia link</button>`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--secondary" type="button" data-action="copy-welcome-email-link" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia collegamento</button><button class="btn btn--primary" type="button" data-action="send-welcome-email" data-email="${escapeHTML(email)}" data-value="${escapeHTML(link)}" data-guardian-name="${escapeHTML(details.guardianName || "")}" data-family-display-name="${escapeHTML(details.familyDisplayName || "")}">${icon("mail", 15)} Invia la mail di benvenuto</button>`,
     });
   }
 
-  async function handleGenerateFamilyLinkAction(actionTarget) {
+  async function handlePrepareFamilyWelcomeEmailAction(actionTarget) {
     const familyId = actionTarget.dataset.familyId;
     const studentId = actionTarget.dataset.studentId;
     const email = normalizeEmailList([actionTarget.dataset.email])[0] || "";
     if (!email || email.endsWith("@invalid.local")) {
       toast(
         "E-mail famiglia mancante",
-        "Inserisci un indirizzo valido nell’anagrafica prima di generare il link.",
+        "Inserisci un indirizzo valido nell’anagrafica prima di preparare la mail.",
         "error",
       );
       return;
     }
-    setButtonLoading(actionTarget, true, "Generazione…");
+    setButtonLoading(actionTarget, true, "Preparazione…");
     try {
       const result = await state.store.generateFamilyInviteLink({
         familyId,
         email,
         guardianName: actionTarget.dataset.guardianName,
       });
-      if (result.account_status === "active" || result.account_active === true) {
-        rememberFamilyAccountStatuses(familyId, [
-          { email, account_status: "active", account_active: true },
-        ]);
-        closeModal();
-        toast("Account attivo", "Non è necessario generare un nuovo invito.");
-        if (studentId) await openStudentDetails(studentId);
-        return;
-      }
+      const accountActive =
+        result.account_status === "active" || result.account_active === true;
       const activationLink = result.activation_link || "";
       if (!result.link_generated || !isValidActivationLink(activationLink)) {
         const error = new Error(
-          "Supabase non ha restituito un link di invito valido.",
+          "Non è stato possibile preparare la mail di benvenuto.",
         );
         error.code = "invalid_edge_response";
         throw error;
       }
+      const family = state.data.families.find((item) => item.id === familyId);
       rememberFamilyAccountStatuses(familyId, [
-        { email, account_status: "pending", account_active: false },
+        {
+          email,
+          account_status: accountActive ? "active" : "pending",
+          account_active: accountActive,
+        },
       ]);
-      openManualInvitationLink(activationLink, email, {
+      openWelcomeEmailModal(activationLink, email, {
         familyId,
         studentId,
         guardianName: actionTarget.dataset.guardianName,
+        familyDisplayName: family?.display_name || family?.guardian_name || "",
+        accountActive,
       });
     } catch (error) {
       setButtonLoading(actionTarget, false);
       toast(
         error?.code === "family_email_missing"
           ? "E-mail famiglia mancante"
-          : "Link non generato",
+          : "Mail non preparata",
         error.message || "Controlla la configurazione Supabase e riprova.",
         "error",
       );
+    } finally {
+      setButtonLoading(actionTarget, false);
     }
   }
 
@@ -7034,8 +7183,8 @@ if (automaticClosure) {
       await openStudentDetails(actionTarget.dataset.studentId, actionTarget);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "generate-family-link") {
-      await handleGenerateFamilyLinkAction(actionTarget);
+    } else if (action === "prepare-family-welcome-email") {
+      await handlePrepareFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "open-lesson-modal") {
       openLessonModal(actionTarget.dataset.date, {
         courseId: actionTarget.dataset.courseId,
@@ -7169,8 +7318,10 @@ if (automaticClosure) {
       downloadStudentCalendar(actionTarget.dataset.studentId);
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
-    } else if (action === "copy-invitation-link") {
-      await copyInvitationLink(actionTarget);
+    } else if (action === "copy-welcome-email-link") {
+      await copyWelcomeEmailLink(actionTarget);
+    } else if (action === "send-welcome-email") {
+      await sendWelcomeEmail(actionTarget);
     } else if (action === "create-makeup-lesson") {
       const courseId = actionTarget.dataset.courseId;
       closeModal();
@@ -7249,8 +7400,8 @@ if (automaticClosure) {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "generate-family-link") {
-      await handleGenerateFamilyLinkAction(actionTarget);
+    } else if (action === "prepare-family-welcome-email") {
+      await handlePrepareFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
     } else if (action === "edit-course") {
@@ -7299,8 +7450,10 @@ if (automaticClosure) {
       }
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
-    } else if (action === "copy-invitation-link") {
-      await copyInvitationLink(actionTarget);
+    } else if (action === "copy-welcome-email-link") {
+      await copyWelcomeEmailLink(actionTarget);
+    } else if (action === "send-welcome-email") {
+      await sendWelcomeEmail(actionTarget);
     } else if (action === "simulate-paypal") {
       setButtonLoading(actionTarget, true, "Pagamento…");
       try {
@@ -7450,7 +7603,7 @@ if (automaticClosure) {
           values.id ? "Allievo aggiornato" : "Allievo aggiunto",
           values.id
             ? "Le modifiche sono state salvate."
-            : "I dati sono salvati. Genera il link di invito dalla scheda dell’allievo.",
+            : "I dati sono salvati. Invia la mail di benvenuto dalla scheda dell’allievo.",
         );
       } else if (formId === "school-closure-form") {
         const closureDate = String(values.closure_date || "");
@@ -7877,6 +8030,34 @@ if (automaticClosure) {
         },
       );
       state.authListener = listener.subscription;
+
+      // Supabase rimanda qui con l'errore nel frammento quando il link e' stato
+      // rifiutato: senza leggerlo ogni causa diversa finiva nello stesso
+      // messaggio generico.
+      const redirectError = readAuthRedirectError();
+      if (redirectError) {
+        clearAuthTicketFromUrl(false);
+        renderLogin(authLinkFailureMessage(redirectError));
+        return;
+      }
+
+      // L'invito manuale arriva come `#token_hash=…&type=invite`: il token viene
+      // speso qui, non da un'anteprima del messaggio che altrimenti lo consuma
+      // prima del genitore.
+      const ticket = readAuthTicket();
+      if (ticket) {
+        const { error: verifyError } = await state.supabase.auth.verifyOtp({
+          type: ticket.type,
+          token_hash: ticket.tokenHash,
+        });
+        clearAuthTicketFromUrl(
+          !verifyError && ["invite", "recovery"].includes(ticket.type),
+        );
+        if (verifyError) {
+          renderLogin(authLinkFailureMessage(verifyError));
+          return;
+        }
+      }
 
       const {
         data: { session },

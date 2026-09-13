@@ -197,7 +197,7 @@ function publicAuthFailure(
     }
     : {
       code: "link_generation_failed",
-      message: "Supabase non ha generato il link di invito.",
+      message: "Supabase non ha preparato la mail di benvenuto.",
       status: 502,
       retryable: true,
     };
@@ -655,6 +655,40 @@ function validActionLink(value: unknown): string | null {
   }
 }
 
+function validHashedToken(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const token = value.trim();
+  return /^[A-Za-z0-9_-]{6,512}$/.test(token) ? token : null;
+}
+
+// I link condivisi a mano devono puntare all'app, non all'endpoint
+// `/auth/v1/verify` di Supabase: quell'URL brucia il token al primo GET, quindi
+// l'anteprima di WhatsApp o un antivirus di posta lo consumerebbero prima del
+// parente. Con `token_hash` il token viene speso solo dal browser che esegue
+// davvero il JavaScript dell'app.
+type GeneratedLinkType = "invite" | "magiclink";
+
+function authLandingLink(
+  redirectTo: string | undefined,
+  hashedToken: string,
+  type: GeneratedLinkType,
+): string | null {
+  if (!redirectTo) return null;
+  let url: URL;
+  try {
+    url = new URL(redirectTo);
+  } catch {
+    return null;
+  }
+  if (type === "invite") {
+    url.searchParams.set("auth_action", "set-password");
+  } else {
+    url.searchParams.delete("auth_action");
+  }
+  url.hash = `token_hash=${encodeURIComponent(hashedToken)}&type=${type}`;
+  return url.toString();
+}
+
 function validateRequestFields(
   body: Record<string, unknown>,
   action: InviteAction,
@@ -715,7 +749,48 @@ async function activeGenerateResponse(
   email: string,
   authUser: User,
   linkedExistingUser: boolean,
+  redirectTo: string | undefined,
 ): Promise<Response> {
+  const { data: linkData, error: linkError } = await admin.auth.admin
+    .generateLink({
+      type: "magiclink",
+      email,
+      options: redirectTo ? { redirectTo } : undefined,
+    });
+  if (linkError) throw new AuthOperationError(linkError, "generate_link");
+
+  const actionLink = validActionLink(linkData?.properties?.action_link);
+  const hashedToken = validHashedToken(linkData?.properties?.hashed_token);
+  const generatedUser = linkData?.user ?? null;
+  if (
+    !generatedUser ||
+    generatedUser.id !== authUser.id ||
+    !actionLink ||
+    !hashedToken ||
+    normalizeEmail(generatedUser.email) !== email
+  ) {
+    throw new PublicOperationError(
+      "invalid_link_response",
+      "Supabase ha restituito una risposta non valida per il link di accesso.",
+      502,
+      true,
+    );
+  }
+
+  const activationLink = authLandingLink(
+    redirectTo,
+    hashedToken,
+    "magiclink",
+  );
+  if (!activationLink) {
+    throw new PublicOperationError(
+      "invalid_link_response",
+      "Non è stato possibile creare un link di accesso sicuro.",
+      502,
+      true,
+    );
+  }
+
   const profileState = await ensureProfile(
     admin,
     authUser,
@@ -730,7 +805,10 @@ async function activeGenerateResponse(
     target_email: email,
     account_status: "active",
     account_active: true,
-    link_generated: false,
+    link_generated: true,
+    activation_link: activationLink,
+    activation_link_kind: "app_token_hash",
+    activation_link_type: "magiclink",
     linked_existing_user: linkedExistingUser,
     profile_repaired: profileState.profileCreated,
     family_link_created: linkState.linkCreated,
@@ -832,6 +910,7 @@ Deno.serve(async (request) => {
         409,
       );
     }
+    const redirectTo = allowedRedirect(body.redirect_to);
     if (initialStatus.account_status === "active" && resolution.user) {
       return await activeGenerateResponse(
         request,
@@ -840,10 +919,10 @@ Deno.serve(async (request) => {
         email,
         resolution.user,
         true,
+        redirectTo,
       );
     }
 
-    const redirectTo = allowedRedirect(body.redirect_to);
     const options = {
       ...(redirectTo ? { redirectTo } : {}),
       data: {
@@ -874,6 +953,7 @@ Deno.serve(async (request) => {
             email,
             freshResolution.user,
             true,
+            redirectTo,
           );
         }
         if (freshStatus.account_status === "disabled") {
@@ -897,15 +977,35 @@ Deno.serve(async (request) => {
     const actionLink = validActionLink(
       linkData?.properties?.action_link,
     );
+    const hashedToken = validHashedToken(
+      linkData?.properties?.hashed_token,
+    );
     const generatedUser = linkData?.user ?? null;
     if (
       !generatedUser ||
       !actionLink ||
+      !hashedToken ||
       normalizeEmail(generatedUser.email) !== email
     ) {
       throw new PublicOperationError(
         "invalid_link_response",
-        "Supabase ha restituito una risposta non valida per il link di invito.",
+        "Supabase ha restituito una risposta non valida per la mail di benvenuto.",
+        502,
+        true,
+      );
+    }
+
+    // Non restituire l'action_link di Supabase come fallback: un client che ne
+    // fa il prefetch consumerebbe di nuovo l'invito al primo GET.
+    const activationLink = authLandingLink(
+      redirectTo,
+      hashedToken,
+      "invite",
+    );
+    if (!activationLink) {
+      throw new PublicOperationError(
+        "invalid_link_response",
+        "Non è stato possibile preparare la mail di benvenuto in modo sicuro.",
         502,
         true,
       );
@@ -931,7 +1031,9 @@ Deno.serve(async (request) => {
       account_status: "pending",
       account_active: false,
       link_generated: true,
-      activation_link: actionLink,
+      activation_link: activationLink,
+      activation_link_kind: "app_token_hash",
+      activation_link_type: "invite",
       linked_existing_user: Boolean(resolution.user || resolution.profile),
       profile_repaired: profileState.profileCreated,
       family_link_created: linkState.linkCreated,

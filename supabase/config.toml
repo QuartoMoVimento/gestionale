@@ -49,11 +49,26 @@ enable_confirmations = true
 secure_password_change = true
 max_frequency = "1m"
 otp_length = 8
-otp_expiry = 3600
+# I link famiglia si condividono a mano (WhatsApp, di persona): un'ora non basta
+# e il genitore trovava il link gia scaduto. 86400 e anche il massimo ammesso.
+otp_expiry = 86400
 
 [auth.email.template.invite]
 subject = "Il tuo accesso a Quarto MoVimento"
 content_path = "./supabase/templates/invite.html"
+
+# Come per l'invito: il link di default di Supabase (ConfirmationURL) punta a
+# /auth/v1/verify e brucia il token al primo GET, anche se a farlo e' uno
+# scanner di sicurezza della posta invece della persona. Questi due template
+# usano TokenHash e rimandano all'app, che spende il token lato browser con
+# auth.verifyOtp() (vedi assets/js/app.js, readAuthTicket/verifyOtp in init()).
+[auth.email.template.magiclink]
+subject = "Il tuo accesso a Quarto MoVimento"
+content_path = "./supabase/templates/magic-link.html"
+
+[auth.email.template.recovery]
+subject = "Reimposta la tua password – Quarto MoVimento"
+content_path = "./supabase/templates/recovery.html"
 
 [auth.sms]
 enable_signup = false

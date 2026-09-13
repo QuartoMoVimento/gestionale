@@ -236,22 +236,39 @@ Nel Dashboard Supabase:
 3. configurare un server SMTP personalizzato in **Authentication → SMTP
    Settings** soltanto se si vogliono usare le funzioni che spediscono davvero
    e-mail, come recupero password e magic link. La creazione degli accessi
-   famiglia non usa SMTP e non invia messaggi: genera un link che
-   l'amministratrice copia e condivide personalmente;
+   famiglia non usa SMTP e non invia messaggi automaticamente: prepara una
+   bozza nel client di posta dell'amministratrice, che controlla e invia la
+   mail di benvenuto manualmente;
 4. creare o invitare dal Dashboard l'account Auth della prima amministratrice
    con indirizzo `quartomov@gmail.com`, senza salvare password nel repository,
    quindi assegnargli ruolo e nome visualizzato come indicato nella sezione
    seguente;
 5. usare successivamente la funzione `invite-family` per verificare lo stato
-   dell'account e generare il link manuale. È un'operazione privilegiata e non
+   dell'account e preparare la mail di benvenuto. È un'operazione privilegiata e non
    deve essere implementata dal browser con una service key.
 
 Il template di invito personalizzato resta versionato in
 `supabase/templates/invite.html` per eventuali inviti inviati direttamente dal
 Dashboard, ma il flusso dell'applicazione non lo usa e non genera alcuna e-mail.
+Anche quel template usa `{{ .TokenHash }}` e porta prima all'app, così un client
+di posta non consuma l'invito facendo l'anteprima del pulsante.
+
+Il link magico (`signInWithOtp`) e il recupero password (`resetPasswordForEmail`)
+invece generano davvero un'e-mail tramite Supabase, e per default il pulsante
+punta a `{{ .ConfirmationURL }}`, cioè l'endpoint `/auth/v1/verify`: come per
+l'invito, quel link si consuma al primo GET anche se a farlo è uno scanner di
+sicurezza della posta (Gmail, Microsoft Safe Links, un antivirus) invece della
+persona destinataria, che si ritrova "il link è scaduto o non valido" su un
+messaggio appena arrivato. `supabase/templates/magic-link.html` e
+`supabase/templates/recovery.html` risolvono lo stesso problema dell'invito:
+usano `{{ .TokenHash }}` e rimandano all'app (`{{ .RedirectTo }}#token_hash=…&type=…`),
+che spende il token lato browser con `auth.verifyOtp()` in `init()`
+(`assets/js/app.js`, funzioni `readAuthTicket`/`authUrlParam`).
+
 Per gli altri messaggi Auth, nei progetti Free creati dal 3 giugno 2026 Supabase
 non consente di personalizzare i template mentre si usa il servizio SMTP
-predefinito. Vedere
+predefinito: lo Studio blocca il salvataggio con un prompt di upgrade finché non
+si configura un SMTP personalizzato in **Authentication → SMTP Settings**. Vedere
 [Auth email templates](https://supabase.com/docs/guides/auth/auth-email-templates),
 [Custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp) e
 [la modifica per il piano Free](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
@@ -289,7 +306,7 @@ Le funzioni previste sono:
 
 | Funzione | Scopo | Autorizzazione applicativa |
 | --- | --- | --- |
-| `invite-family` | verifica l'account e genera un link famiglia senza inviare e-mail | sessione verificata e ruolo admin |
+| `invite-family` | verifica l'account e prepara il collegamento per la mail di benvenuto | sessione verificata e ruolo admin |
 | `paypal-create-order` | crea un ordine dall'importo della scadenza nel DB | sessione e proprietà della scadenza verificate |
 | `paypal-capture-order` | cattura e registra il pagamento | sessione e proprietà della scadenza verificate |
 | `paypal-webhook` | riceve e riconcilia gli eventi PayPal | firma PayPal obbligatoria |
@@ -366,21 +383,72 @@ Gli indirizzi sono conservati in `family_access_emails`, leggibile dal browser
 solo per un'amministratrice autenticata.
 
 Aprendo la scheda dell'allievo, il frontend chiede a `invite-family` lo stato
-Auth. Per un account non ancora confermato mostra **Genera link di invito** o
-**Genera nuovo link**; per un account confermato mostra **Account attivo**. La
-funzione usa `auth.admin.generateLink({ type: "invite" })`: il link torna nella
+Auth e mostra sempre **Invia la mail di benvenuto** per gli account utilizzabili.
+Il pulsante prepara una bozza nel client di posta, ma l'invio resta manuale. Per
+un account non ancora confermato include un link di attivazione; per un account
+confermato include un magic link monouso, così il parente entra senza modificare
+la password. La
+funzione usa `auth.admin.generateLink({ type: "invite" | "magiclink" })`: il
+link torna nella
 sola risposta HTTPS con `Cache-Control: no-store`, non viene salvato né inserito
 nei log e nessuna chiave amministrativa raggiunge il frontend.
 
-Per pubblicare questo flusso applicare prima la migrazione `013`, poi distribuire
-la Edge Function e infine il frontend:
+Il link condiviso **non** è l'`action_link` di Supabase. La funzione prende
+`properties.hashed_token` e costruisce un indirizzo dell'applicazione:
 
-```bash
-npx supabase db push --dry-run
-npx supabase db push
-npx supabase functions deploy invite-family
-git push origin main
 ```
+https://gestionale.quartomovimento.it/?auth_action=set-password#token_hash=<hash>&type=invite
+```
+
+L'endpoint `/auth/v1/verify` di Supabase consuma il token al primo `GET`: le
+anteprime di WhatsApp, Messenger o Gmail e gli scanner antivirus lo bruciavano
+prima che il genitore aprisse il messaggio, che quindi leggeva «il link è scaduto
+o non valido» su un link appena generato. Con il `token_hash` nel frammento il
+crawler scarica solo l'HTML statico — il frammento non arriva nemmeno al server —
+e il token viene speso da `auth.verifyOtp()` solo nel browser che esegue davvero
+il JavaScript dell'app.
+
+Restano due proprietà da tenere presenti: il link vale una sola volta (generarne
+uno nuovo invalida il precedente) e scade dopo `otp_expiry`, portato a 24 ore in
+`supabase/config.toml` perché un'ora non basta per un link condiviso a mano.
+
+### Magic link e reset password
+
+Lo stesso problema del link "bruciabile" riguarda anche l'accesso senza
+password (**Ricevi un link via e-mail**) e il recupero password
+(**Password dimenticata?**): a differenza dell'invito, qui è Supabase stesso a
+spedire l'e-mail (nessuna Edge Function di mezzo), quindi il link va corretto
+nel template, non nel codice. `supabase/templates/magic-link.html` e
+`supabase/templates/recovery.html` sostituiscono `{{ .ConfirmationURL }}` con
+un link basato su `{{ .TokenHash }}`, sullo stesso schema dell'invito.
+
+### Pubblicare le modifiche
+
+`config.toml` descrive lo stato desiderato ma **non modifica da solo il
+progetto remoto**: `otp_expiry` e i tre template email vanno replicati a mano
+nel Dashboard.
+
+1. **Authentication → Emails → Email OTP Expiration** → `86400` (24 ore).
+2. **Authentication → Emails → Templates**:
+   - *Invite*: incollare `supabase/templates/invite.html` (oggetto "Il tuo
+     accesso a Quarto MoVimento"); resta inutilizzato dal flusso applicativo ma
+     tenerlo coerente per eventuali inviti spediti a mano dal Dashboard.
+   - *Magic Link*: incollare `supabase/templates/magic-link.html` (stesso
+     oggetto).
+   - *Reset Password*: incollare `supabase/templates/recovery.html` (oggetto
+     "Reimposta la tua password – Quarto MoVimento").
+   - Se il salvataggio è bloccato da un prompt di upgrade, il progetto è sul
+     piano Free post 3 giugno 2026: configurare prima un SMTP personalizzato in
+     **Authentication → SMTP Settings**, poi ripetere il salvataggio dei tre
+     template.
+3. Applicare la migrazione, distribuire la Edge Function e il frontend:
+
+   ```bash
+   npx supabase db push --dry-run
+   npx supabase db push
+   npx supabase functions deploy invite-family
+   git push origin main
+   ```
 
 Non servono nuovi secret. Restano necessari i valori server-side già descritti
 sopra; in particolare `SITE_URL` deve puntare a
