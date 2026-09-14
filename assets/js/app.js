@@ -906,6 +906,28 @@ function schoolClosuresForStudent(studentId) {
       : [];
   }
 
+  function courseRoster(courseId) {
+    if (!state.data) return [];
+    return state.data.enrollments
+      .filter(
+        (enrollment) =>
+          enrollment.course_id === courseId && enrollment.is_active !== false,
+      )
+      .map((enrollment) => ({
+        enrollment,
+        student: state.data.students.find(
+          (student) =>
+            student.id === enrollment.student_id && student.is_active !== false,
+        ),
+      }))
+      .filter((item) => item.student)
+      .sort((a, b) =>
+        fullName(a.student).localeCompare(fullName(b.student), "it", {
+          sensitivity: "base",
+        }),
+      );
+  }
+
   function enrollmentForLessonStudent(studentId, lesson) {
     const lessonDay = lesson ? dateKey(lesson.starts_at) : todayKey();
     return enrollmentsForStudent(studentId)
@@ -4472,15 +4494,11 @@ function schoolClosuresForStudent(studentId) {
                 courses.length
                   ? courses
                       .map((course) => {
-                        const count = state.data.enrollments.filter(
-                          (item) =>
-                            item.course_id === course.id &&
-                            item.is_active !== false,
-                        ).length;
+                        const count = courseRoster(course.id).length;
                         const schedule = courseScheduleConfigured(course)
                           ? `<strong>${escapeHTML(COURSE_WEEKDAYS[course.weekday] || "—")} · ${escapeHTML(courseTimeRange(course))}</strong><br><span class="subtle">${escapeHTML(formatDate(course.starts_on))}–${escapeHTML(formatDate(course.ends_on))}</span>`
                           : `<span class="badge badge--warning">Da configurare</span>`;
-                        return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${schedule}</td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" aria-label="Modifica">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
+                        return `<tr><td><span class="dot" style="background:${safeColor(course.color)};margin-right:7px"></span><strong>${escapeHTML(course.name)}</strong></td><td>${schedule}</td><td>${escapeHTML(course.duration_minutes)} min</td><td>${escapeHTML(course.location || "—")}</td><td>${count}</td><td><div class="row-actions"><button class="row-action" type="button" data-action="view-course" data-course-id="${escapeHTML(course.id)}" title="Visualizza iscritti" aria-label="Visualizza corso e iscritti">${icon("eye", 15)}</button><button class="row-action" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}" title="Modifica corso" aria-label="Modifica corso">${icon("edit", 15)}</button><button class="row-action" type="button" data-action="delete-course" data-course-id="${escapeHTML(course.id)}" title="Elimina corso" aria-label="Elimina corso">${icon("trash", 15)}</button></div></td></tr>`;
                       })
                       .join("")
                   : `<tr><td colspan="6"><div class="empty-state"><h3>Nessun corso attivo</h3><p>Aggiungi il primo corso per creare il calendario.</p></div></td></tr>`
@@ -5766,6 +5784,57 @@ if (automaticClosure) {
             : ""
         }
       `,
+    });
+  }
+
+  function openCourseDetails(courseId) {
+    const course = state.data.courses.find((item) => item.id === courseId);
+    if (!course) return;
+    const roster = courseRoster(course.id);
+    const schedule = courseScheduleConfigured(course)
+      ? `${COURSE_WEEKDAYS[course.weekday] || "—"} · ${courseTimeRange(course)} · ${formatDate(course.starts_on)}–${formatDate(course.ends_on)}`
+      : "Programmazione da configurare";
+
+    openModal({
+      title: course.name,
+      subtitle: `${roster.length} ${roster.length === 1 ? "allievo iscritto" : "allievi iscritti"}`,
+      className: "modal--lg",
+      body: `
+        <div class="bank-box">
+          <div class="bank-box__row"><span>Programmazione</span><strong>${escapeHTML(schedule)}</strong></div>
+          <div class="bank-box__row"><span>Durata</span><strong>${escapeHTML(course.duration_minutes)} minuti</strong></div>
+          <div class="bank-box__row"><span>Sede</span><strong>${escapeHTML(course.location || "—")}</strong></div>
+        </div>
+        <div class="setting-section">
+          <h3>Allievi iscritti</h3>
+          <p>Elenco delle iscrizioni attive associate a questo corso.</p>
+          ${
+            roster.length
+              ? `<div class="activity-list">${roster
+                  .map(({ student, enrollment }) => {
+                    const family = familyForStudent(student);
+                    const plan =
+                      LABELS.plan[enrollment.plan_type] ||
+                      enrollment.plan_type ||
+                      "Piano da definire";
+                    const period = [
+                      enrollment.starts_on
+                        ? `dal ${formatDate(enrollment.starts_on)}`
+                        : "",
+                      enrollment.ends_on
+                        ? `al ${formatDate(enrollment.ends_on)}`
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ");
+                    return `<div class="activity-item"><span class="activity-icon">${icon("users", 16)}</span><span class="activity-copy"><strong>${escapeHTML(fullName(student))}</strong><span>${escapeHTML(family?.display_name || family?.guardian_name || "Famiglia non indicata")} · ${escapeHTML(plan)}${period ? ` · ${escapeHTML(period)}` : ""}</span></span></div>`;
+                  })
+                  .join("")}</div>`
+              : `<div class="empty-state"><span class="empty-state__icon">${icon("users", 22)}</span><h3>Nessun allievo iscritto</h3><p>Al momento non risultano iscrizioni attive per questo corso.</p></div>`
+          }
+        </div>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--primary" type="button" data-action="edit-course" data-course-id="${escapeHTML(course.id)}">${icon("edit", 15)} Modifica corso</button>`,
     });
   }
 
@@ -7204,6 +7273,8 @@ if (automaticClosure) {
       openAssignMakeupModal(actionTarget.dataset.creditId);
     } else if (action === "open-course-modal") {
       openCourseModal();
+    } else if (action === "view-course") {
+      openCourseDetails(actionTarget.dataset.courseId);
     } else if (action === "edit-course") {
       openCourseModal(actionTarget.dataset.courseId);
     } else if (action === "delete-course") {
@@ -7404,6 +7475,8 @@ if (automaticClosure) {
       await handlePrepareFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
+    } else if (action === "view-course") {
+      openCourseDetails(actionTarget.dataset.courseId);
     } else if (action === "edit-course") {
       openCourseModal(actionTarget.dataset.courseId);
     } else if (action === "edit-lesson") {
