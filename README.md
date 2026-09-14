@@ -28,6 +28,8 @@ Area amministrativa:
   accessi e-mail per lo stesso nucleo;
 - corsi con periodo, giorno e ora settimanale collegati automaticamente al
   calendario, oltre a lezioni singole e recuperi;
+- lezioni individuali gestite dalla scheda dell'allievo, con orario fisso
+  settimanale oppure appuntamenti variabili;
 - date di **chiusura per festività** che rimuovono dal calendario le lezioni
   ordinarie senza generare assenze o recuperi;
 - registrazione giornaliera di presenze e assenze;
@@ -197,6 +199,15 @@ restano quindi sempre collegati. Le date aggiunte manualmente, le prove, gli
 eventi, i recuperi, le presenze e lo storico non vengono riscritti. Una singola
 lezione generata può essere annullata, ma la sua data si modifica dal corso per
 evitare due fonti di verità.
+
+Per i corsi il cui nome contiene **individuale** o **individuali**, la scheda
+dell'allievo permette invece di scegliere una programmazione personale. La
+modalità **orario settimanale fisso** genera le date per il periodo
+dell'iscrizione; la modalità **appuntamenti variabili** consente di aggiungere
+ogni data separatamente. Queste lezioni sono associate al singolo allievo, così
+nel registro compare soltanto il nominativo corretto e ciascuna famiglia vede
+esclusivamente i propri appuntamenti. La migrazione `018` introduce i campi e
+le policy necessari.
 
 La migrazione `014` importa inizialmente anche i corsi ricorrenti già presenti:
 ricava giorno e ora dal loro nome e usa il periodo didattico configurato nelle

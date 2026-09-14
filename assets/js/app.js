@@ -600,6 +600,18 @@
     );
   }
 
+  function isIndividualCourse(course) {
+    return String(course?.name || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .includes("individual");
+  }
+
+  function enrollmentScheduleMode(enrollment) {
+    return enrollment?.lesson_schedule_mode || "course";
+  }
+
   function courseStartTime(course) {
     return String(course?.start_time || "").slice(0, 5);
   }
@@ -834,6 +846,16 @@ function schoolClosuresForStudent(studentId) {
 
         if (!course) return false;
 
+        if (enrollmentScheduleMode(enrollment) === "fixed") {
+          const closureWeekday =
+            toLocalDate(closureDate).getDay() || 7;
+          return closureWeekday === Number(enrollment.lesson_weekday);
+        }
+
+        if (enrollmentScheduleMode(enrollment) === "variable") {
+          return true;
+        }
+
         if (!courseScheduleConfigured(course)) {
           return true;
         }
@@ -1051,11 +1073,14 @@ function schoolClosuresForStudent(studentId) {
       lesson.lesson_type,
     );
     const studentIds = new Set();
-    if (!isMakeupSession) {
+    if (!isMakeupSession && lesson.student_id) {
+      studentIds.add(lesson.student_id);
+    } else if (!isMakeupSession) {
       state.data.enrollments
         .filter(
           (item) =>
             item.course_id === lesson.course_id &&
+            enrollmentScheduleMode(item) === "course" &&
             (!item.starts_on || item.starts_on <= dateKey(lesson.starts_at)) &&
             (!item.ends_on || item.ends_on >= dateKey(lesson.starts_at)) &&
             (item.is_active !== false || Boolean(item.ends_on)),
@@ -1083,6 +1108,14 @@ function schoolClosuresForStudent(studentId) {
       .sort((a, b) => fullName(a).localeCompare(fullName(b), "it"));
   }
 
+  function isEmptyLegacyIndividualLesson(lesson) {
+    return Boolean(
+      lesson?.origin === "course_schedule" &&
+        isIndividualCourse(courseForLesson(lesson)) &&
+        studentsForLesson(lesson).length === 0,
+    );
+  }
+
   function attendanceFor(lessonId, studentId) {
     return state.data
       ? state.data.attendance.find(
@@ -1097,7 +1130,7 @@ function schoolClosuresForStudent(studentId) {
       !state.data ||
       !lesson ||
       lesson.status !== "scheduled" ||
-      lesson.origin === "course_schedule" ||
+      lesson.origin !== "manual" ||
       ["makeup", "recovery"].includes(lesson.lesson_type)
     ) {
       return false;
@@ -1338,8 +1371,10 @@ function schoolClosuresForStudent(studentId) {
         copy.courses = copy.courses.filter((item) =>
           courseIds.includes(item.id),
         );
-        copy.lessons = copy.lessons.filter((item) =>
-          courseIds.includes(item.course_id),
+        copy.lessons = copy.lessons.filter(
+          (item) =>
+            courseIds.includes(item.course_id) &&
+            (!item.student_id || studentIds.includes(item.student_id)),
         );
         const lessonIds = copy.lessons.map((item) => item.id);
         copy.attendance = copy.attendance.filter(
@@ -1636,14 +1671,17 @@ function schoolClosuresForStudent(studentId) {
           ? this.data.makeupCredits.filter(
               (item) => item.used_lesson_id === lesson.id,
             )
-          : this.data.enrollments.filter(
-              (item) =>
-                item.course_id === lesson.course_id &&
-                (!item.starts_on ||
-                  item.starts_on <= dateKey(lesson.starts_at)) &&
-                (!item.ends_on ||
-                  item.ends_on >= dateKey(lesson.starts_at)),
-            );
+          : lesson.student_id
+            ? [{ student_id: lesson.student_id }]
+            : this.data.enrollments.filter(
+                (item) =>
+                  item.course_id === lesson.course_id &&
+                  enrollmentScheduleMode(item) === "course" &&
+                  (!item.starts_on ||
+                    item.starts_on <= dateKey(lesson.starts_at)) &&
+                  (!item.ends_on ||
+                    item.ends_on >= dateKey(lesson.starts_at)),
+              );
         const marked = this.data.attendance.filter(
           (item) => item.lesson_id === lessonId,
         );
@@ -1668,6 +1706,8 @@ function schoolClosuresForStudent(studentId) {
         repetitions.push({
           id: `lesson-${Date.now()}-${count}`,
           course_id: payload.course_id,
+          student_id: payload.student_id || null,
+          enrollment_id: payload.enrollment_id || null,
           starts_at: start.toISOString(),
           ends_at: end.toISOString(),
           lesson_type: payload.lesson_type || "regular",
@@ -1687,6 +1727,118 @@ function schoolClosuresForStudent(studentId) {
       );
       this.data.lessons.push(...repetitions);
       return repetitions;
+    }
+
+    async saveIndividualSchedule(payload) {
+      const enrollment = this.data.enrollments.find(
+        (item) => item.id === payload.enrollment_id,
+      );
+      if (!enrollment) throw new Error("Iscrizione non trovata.");
+      const course = this.data.courses.find(
+        (item) => item.id === enrollment.course_id,
+      );
+      const student = this.data.students.find(
+        (item) => item.id === enrollment.student_id,
+      );
+      const mode = payload.lesson_schedule_mode;
+      if (!course || !student) {
+        throw new Error("Dati dell’iscrizione incompleti.");
+      }
+      if (mode === "fixed" && !enrollment.ends_on && !course.ends_on) {
+        throw new Error(
+          "Indica una data di fine iscrizione per usare l’orario fisso.",
+        );
+      }
+      Object.assign(enrollment, {
+        lesson_schedule_mode: mode,
+        lesson_weekday:
+          mode === "fixed" ? Number(payload.lesson_weekday) : null,
+        lesson_start_time:
+          mode === "fixed" ? payload.lesson_start_time : null,
+        lesson_duration_minutes:
+          mode === "fixed"
+            ? Number(payload.lesson_duration_minutes || course?.duration_minutes || 50)
+            : null,
+      });
+
+      const now = new Date();
+      const removableIds = new Set(
+        this.data.lessons
+          .filter(
+            (lesson) =>
+              lesson.enrollment_id === enrollment.id &&
+              lesson.origin === "enrollment_schedule" &&
+              lesson.status === "scheduled" &&
+              new Date(lesson.starts_at) >= now &&
+              !this.data.attendance.some(
+                (attendance) => attendance.lesson_id === lesson.id,
+              ) &&
+              !this.data.makeupCredits.some(
+                (credit) =>
+                  credit.source_lesson_id === lesson.id ||
+                  credit.used_lesson_id === lesson.id,
+              ),
+          )
+          .map((lesson) => lesson.id),
+      );
+      this.data.lessons = this.data.lessons.filter(
+        (lesson) => !removableIds.has(lesson.id),
+      );
+
+      let created = 0;
+      if (mode === "fixed") {
+        const endKey = enrollment.ends_on || course?.ends_on;
+        let cursor = toLocalDate(
+          [enrollment.starts_on || todayKey(), todayKey()].sort().pop(),
+        );
+        const targetWeekday = Number(enrollment.lesson_weekday);
+        while ((cursor.getDay() || 7) !== targetWeekday) {
+          cursor = addDays(cursor, 1);
+        }
+        while (dateKey(cursor) <= endKey) {
+          const occurrenceOn = dateKey(cursor);
+          const start = romeDateTime(
+            occurrenceOn,
+            enrollment.lesson_start_time,
+          );
+          const duplicate = this.data.lessons.some(
+            (lesson) =>
+              lesson.student_id === student?.id &&
+              lesson.starts_at === start.toISOString() &&
+              !String(lesson.status).startsWith("cancelled"),
+          );
+          if (
+            start >= now &&
+            !schoolClosureForDate(occurrenceOn) &&
+            !duplicate
+          ) {
+            this.data.lessons.push({
+              id: `lesson-enrollment-${enrollment.id}-${occurrenceOn}`,
+              course_id: enrollment.course_id,
+              student_id: student.id,
+              enrollment_id: enrollment.id,
+              starts_at: start.toISOString(),
+              ends_at: new Date(
+                start.getTime() +
+                  Number(enrollment.lesson_duration_minutes) * 60000,
+              ).toISOString(),
+              lesson_type: "regular",
+              status: "scheduled",
+              title: null,
+              location: null,
+              notes: "",
+              origin: "enrollment_schedule",
+              occurrence_on: occurrenceOn,
+            });
+            created += 1;
+          }
+          cursor = addDays(cursor, 7);
+        }
+      }
+      this.data.lessons.sort(
+        (a, b) => new Date(a.starts_at) - new Date(b.starts_at),
+      );
+      return { created, removed: removableIds.size };
     }
 
     async updateLesson(payload) {
@@ -2572,6 +2724,8 @@ function schoolClosuresForStudent(studentId) {
         );
         rows.push({
           course_id: payload.course_id,
+          student_id: payload.student_id || null,
+          enrollment_id: payload.enrollment_id || null,
           starts_at: start.toISOString(),
           ends_at: end.toISOString(),
           lesson_type: payload.lesson_type || "regular",
@@ -2591,6 +2745,28 @@ function schoolClosuresForStudent(studentId) {
         .from("lessons")
         .insert(rows)
         .select();
+      if (error) throw error;
+      return data;
+    }
+
+    async saveIndividualSchedule(payload) {
+      const mode = payload.lesson_schedule_mode;
+      const { data, error } = await this.client
+        .from("enrollments")
+        .update({
+          lesson_schedule_mode: mode,
+          lesson_weekday:
+            mode === "fixed" ? Number(payload.lesson_weekday) : null,
+          lesson_start_time:
+            mode === "fixed" ? payload.lesson_start_time : null,
+          lesson_duration_minutes:
+            mode === "fixed"
+              ? Number(payload.lesson_duration_minutes)
+              : null,
+        })
+        .eq("id", payload.enrollment_id)
+        .select()
+        .single();
       if (error) throw error;
       return data;
     }
@@ -3217,6 +3393,7 @@ function schoolClosuresForStudent(studentId) {
         (item) =>
           dateKey(item.starts_at) === todayKey() &&
           !String(item.status).startsWith("cancelled") &&
+          !isEmptyLegacyIndividualLesson(item) &&
           !lessonIsOnSchoolClosure(item),
       )
       .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
@@ -3520,7 +3697,8 @@ function schoolClosuresForStudent(studentId) {
       .filter(
         (item) =>
           dateKey(item.starts_at) === state.attendanceDate &&
-          !String(item.status).startsWith("cancelled"),
+          !String(item.status).startsWith("cancelled") &&
+          !isEmptyLegacyIndividualLesson(item),
       )
       .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
     const lessons = closure
@@ -3732,6 +3910,7 @@ function schoolClosuresForStudent(studentId) {
     .filter(
       (item) =>
         dateKey(item.starts_at) === state.calendarSelectedDate &&
+        !isEmptyLegacyIndividualLesson(item) &&
         !lessonIsOnSchoolClosure(item),
     )
     .sort(
@@ -3830,6 +4009,7 @@ function schoolClosuresForStudent(studentId) {
                 .filter(
                   (item) =>
                     dateKey(item.starts_at) === key &&
+                    !isEmptyLegacyIndividualLesson(item) &&
                     !lessonIsOnSchoolClosure(item),
                 )
                 .sort(
@@ -4630,9 +4810,11 @@ function schoolClosuresForStudent(studentId) {
         if (["makeup", "recovery"].includes(lesson.lesson_type)) {
           return assignedLessonIds.has(lesson.id);
         }
+        if (lesson.student_id) return lesson.student_id === studentId;
         return enrollments.some(
           (enrollment) =>
             lesson.course_id === enrollment.course_id &&
+            enrollmentScheduleMode(enrollment) === "course" &&
             (!enrollment.starts_on ||
               dateKey(lesson.starts_at) >= enrollment.starts_on) &&
             (!enrollment.ends_on ||
@@ -5446,6 +5628,10 @@ function schoolClosuresForStudent(studentId) {
     }
     const course = courseForStudent(student.id);
     const enrollment = enrollmentForStudent(student.id);
+    const individualCourse = isIndividualCourse(course);
+    const individualMode = enrollmentScheduleMode(enrollment);
+    const fixedIndividualSchedule = individualMode === "fixed";
+    const variableIndividualSchedule = individualMode === "variable";
     const stats = studentAttendanceStats(student.id);
     const invoices = state.data.invoices.filter(
       (item) => item.student_id === student.id,
@@ -5490,6 +5676,21 @@ function schoolClosuresForStudent(studentId) {
             <div class="activity-item"><span class="activity-icon">${icon("phone", 16)}</span><span class="activity-copy"><strong>${escapeHTML(family?.phone || "—")}</strong><span>Telefono</span></span></div>
           </div>
         </div>
+        ${
+          individualCourse && enrollment
+            ? `<div class="setting-section">
+                <h3>Programmazione lezioni individuali</h3>
+                <p>Gestisci gli appuntamenti direttamente dalla scheda di ${escapeHTML(student.first_name)}.</p>
+                <div class="activity-list">
+                  <div class="activity-item"><span class="activity-icon">${icon(fixedIndividualSchedule ? "repeat" : "calendar", 16)}</span><span class="activity-copy"><strong>${fixedIndividualSchedule ? "Orario settimanale fisso" : variableIndividualSchedule ? "Appuntamenti variabili" : "Programmazione da scegliere"}</strong><span>${fixedIndividualSchedule ? `${escapeHTML(COURSE_WEEKDAYS[enrollment.lesson_weekday] || "Giorno da definire")} · ${escapeHTML(String(enrollment.lesson_start_time || "").slice(0, 5))} · ${escapeHTML(enrollment.lesson_duration_minutes || course.duration_minutes || 50)} minuti` : variableIndividualSchedule ? "Data e ora possono cambiare ogni settimana" : "Scegli se usare un orario fisso o date variabili"}</span></span></div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px">
+                  <button class="btn btn--secondary btn--sm" type="button" data-action="open-individual-schedule" data-student-id="${escapeHTML(student.id)}">${icon("settings", 15)} ${fixedIndividualSchedule ? "Modifica orario" : "Imposta modalità"}</button>
+                  <button class="btn btn--primary btn--sm" type="button" data-action="open-student-lesson" data-student-id="${escapeHTML(student.id)}" data-course-id="${escapeHTML(course.id)}">${icon("plus", 15)} Nuovo appuntamento</button>
+                </div>
+              </div>`
+            : ""
+        }
         ${student.notes ? `<div class="setting-section"><h3>Nota condivisa</h3><p class="muted">${escapeHTML(student.notes)}</p></div>` : ""}
         ${enrollment?.notes ? `<div class="setting-section"><h3>Note del piano</h3><p class="muted">${escapeHTML(enrollment.notes)}</p></div>` : ""}
       `,
@@ -5564,6 +5765,97 @@ if (automaticClosure) {
     });
   }
 
+  function studentsForCourseOnDate(courseId, dateValue) {
+    const lessonDate = dateValue || todayKey();
+    const studentIds = new Set(
+      state.data.enrollments
+        .filter(
+          (enrollment) =>
+            enrollment.course_id === courseId &&
+            enrollment.is_active !== false &&
+            (!enrollment.starts_on || enrollment.starts_on <= lessonDate) &&
+            (!enrollment.ends_on || enrollment.ends_on >= lessonDate),
+        )
+        .map((enrollment) => enrollment.student_id),
+    );
+    return state.data.students
+      .filter(
+        (student) =>
+          studentIds.has(student.id) && student.is_active !== false,
+      )
+      .sort((a, b) =>
+        fullName(a).localeCompare(fullName(b), "it", {
+          sensitivity: "base",
+        }),
+      );
+  }
+
+  function lessonStudentOptions(courseId, dateValue, selectedId) {
+    return studentsForCourseOnDate(courseId, dateValue)
+      .map(
+        (student) =>
+          `<option value="${escapeHTML(student.id)}"${student.id === selectedId ? " selected" : ""}>${escapeHTML(fullName(student))}</option>`,
+      )
+      .join("");
+  }
+
+  function updateLessonStudentField(courseId, dateValue) {
+    const field = document.getElementById("lesson-student-field");
+    const select = document.getElementById("lesson-student");
+    if (!field || !select) return;
+    const course = state.data.courses.find((item) => item.id === courseId);
+    const individual = isIndividualCourse(course);
+    field.hidden = !individual;
+    select.disabled = !individual;
+    select.required = individual;
+    select.innerHTML = individual
+      ? `<option value="">Scegli l’allievo</option>${lessonStudentOptions(courseId, dateValue, select.value)}`
+      : '<option value="">Lezione per tutti gli iscritti</option>';
+  }
+
+  function openIndividualScheduleModal(studentId) {
+    const student = state.data.students.find((item) => item.id === studentId);
+    const enrollment = enrollmentForStudent(studentId);
+    const course = courseForStudent(studentId);
+    if (!student || !enrollment || !course || !isIndividualCourse(course)) {
+      toast(
+        "Programmazione non disponibile",
+        "Questa funzione è riservata agli allievi iscritti alle lezioni individuali.",
+        "warning",
+      );
+      return;
+    }
+    const currentMode =
+      enrollmentScheduleMode(enrollment) === "fixed" ? "fixed" : "variable";
+    openModal({
+      title: `Programmazione · ${fullName(student)}`,
+      subtitle: course.name,
+      className: "modal--lg",
+      body: `
+        <form id="individual-schedule-form">
+          <input type="hidden" name="enrollment_id" value="${escapeHTML(enrollment.id)}" />
+          <input type="hidden" name="student_id" value="${escapeHTML(student.id)}" />
+          <div class="field">
+            <label for="individual-schedule-mode">Organizzazione degli appuntamenti</label>
+            <select class="select" id="individual-schedule-mode" name="lesson_schedule_mode" required>
+              <option value="variable"${currentMode === "variable" ? " selected" : ""}>Appuntamenti variabili</option>
+              <option value="fixed"${currentMode === "fixed" ? " selected" : ""}>Orario settimanale fisso</option>
+            </select>
+            <p class="field-hint">Puoi cambiare modalità in seguito dalla scheda dell’allievo.</p>
+          </div>
+          <div id="individual-fixed-fields" class="form-grid"${currentMode === "fixed" ? "" : " hidden"} style="margin-top:16px">
+            <div class="field"><label for="individual-weekday">Giorno</label><select class="select" id="individual-weekday" name="lesson_weekday"${currentMode === "fixed" ? " required" : ""}><option value="">Scegli il giorno</option>${Object.entries(COURSE_WEEKDAYS).map(([value, label]) => `<option value="${value}"${Number(enrollment.lesson_weekday || course.weekday) === Number(value) ? " selected" : ""}>${escapeHTML(label)}</option>`).join("")}</select></div>
+            <div class="field"><label for="individual-start-time">Ora di inizio</label><input class="input" id="individual-start-time" name="lesson_start_time" type="time" value="${escapeHTML(String(enrollment.lesson_start_time || course.start_time || "16:30").slice(0, 5))}"${currentMode === "fixed" ? " required" : ""} /></div>
+            <div class="field"><label for="individual-duration">Durata (minuti)</label><input class="input" id="individual-duration" name="lesson_duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(enrollment.lesson_duration_minutes || course.duration_minutes || 50)}"${currentMode === "fixed" ? " required" : ""} /></div>
+            <div class="field"><label>Periodo</label><input class="input" value="${escapeHTML(formatDate(enrollment.starts_on))}–${escapeHTML(enrollment.ends_on ? formatDate(enrollment.ends_on) : "senza data di fine")}" disabled /><p class="field-hint">Il periodo si modifica dai dati dell’allievo.</p></div>
+          </div>
+          <div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Con l’orario fisso il calendario viene generato automaticamente. Con gli appuntamenti variabili inserirai ogni data dalla scheda dell’allievo.</p></div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="individual-schedule-form">Salva programmazione</button>`,
+    });
+  }
+
   function openLessonModal(dateValue, defaults) {
     const options = defaults || {};
     const date = dateValue || state.calendarSelectedDate || todayKey();
@@ -5575,9 +5867,17 @@ if (automaticClosure) {
       );
       return;
     }
+    const selectedStudent = options.studentId
+      ? state.data.students.find((item) => item.id === options.studentId)
+      : null;
+    const selectedEnrollment = selectedStudent
+      ? enrollmentForStudent(selectedStudent.id)
+      : null;
     const defaultCourse =
-      state.data.courses.find((item) => item.id === options.courseId) ||
-      state.data.courses.find((item) => item.is_active !== false);
+      state.data.courses.find(
+        (item) =>
+          item.id === (options.courseId || selectedEnrollment?.course_id),
+      ) || state.data.courses.find((item) => item.is_active !== false);
     const defaultType = options.lessonType || "regular";
     openModal({
       title:
@@ -5590,7 +5890,7 @@ if (automaticClosure) {
       body: `
         <form id="lesson-form">
           <div class="form-grid">
-            <div class="field field--full"><label for="lesson-course">Corso</label><select class="select" id="lesson-course" name="course_id" required><option value="">Scegli il corso</option>${courseOptions(defaultCourse?.id || "")}</select></div>
+            ${selectedStudent ? `<div class="field field--full"><label>Corso</label><input class="input" value="${escapeHTML(defaultCourse?.name || "—")}" disabled /><input type="hidden" name="course_id" value="${escapeHTML(defaultCourse?.id || "")}" /><input type="hidden" name="student_id" value="${escapeHTML(selectedStudent.id)}" /><input type="hidden" name="enrollment_id" value="${escapeHTML(selectedEnrollment?.id || "")}" /></div><div class="field field--full"><label>Allievo</label><input class="input" value="${escapeHTML(fullName(selectedStudent))}" disabled /></div>` : `<div class="field field--full"><label for="lesson-course">Corso</label><select class="select" id="lesson-course" name="course_id" required><option value="">Scegli il corso</option>${courseOptions(defaultCourse?.id || "")}</select></div><div class="field field--full" id="lesson-student-field"${isIndividualCourse(defaultCourse) ? "" : " hidden"}><label for="lesson-student">Allievo</label><select class="select" id="lesson-student" name="student_id"${isIndividualCourse(defaultCourse) ? " required" : " disabled"}><option value="">Scegli l’allievo</option>${lessonStudentOptions(defaultCourse?.id || "", date, "")}</select><p class="field-hint">L’appuntamento sarà visibile soltanto alla famiglia dell’allievo selezionato.</p></div>`}
             <div class="field"><label for="lesson-date">Data</label><input class="input" id="lesson-date" name="date" type="date" value="${escapeHTML(date)}" required /></div>
             <div class="field"><label for="lesson-time">Ora di inizio</label><input class="input" id="lesson-time" name="time" type="time" value="16:30" required /></div>
             <div class="field"><label for="lesson-type">Tipo</label><select class="select" id="lesson-type" name="lesson_type"><option value="regular"${defaultType === "regular" ? " selected" : ""}>Lezione ordinaria</option><option value="makeup"${["makeup", "recovery"].includes(defaultType) ? " selected" : ""}>Recupero</option><option value="trial"${defaultType === "trial" ? " selected" : ""}>Lezione di prova</option><option value="event"${defaultType === "event" ? " selected" : ""}>Laboratorio/evento</option><option value="extra"${defaultType === "extra" ? " selected" : ""}>Extra</option></select></div>
@@ -5679,6 +5979,8 @@ if (automaticClosure) {
         "Lezione non modificabile",
         lesson.origin === "course_schedule"
           ? "È generata dal corso: modifica giorno, ora o periodo nelle impostazioni del corso."
+          : lesson.origin === "enrollment_schedule"
+            ? "È generata dall’orario fisso: modifica la programmazione dalla scheda dell’allievo."
           : "Ha già presenze registrate o recuperi collegati. Annullala e crea una nuova data.",
         "warning",
       );
@@ -5748,6 +6050,8 @@ if (automaticClosure) {
     const students = studentsForLesson(lesson);
     const isRecovery = ["makeup", "recovery"].includes(lesson.lesson_type);
     const managedByCourse = lesson.origin === "course_schedule";
+    const managedByEnrollment = lesson.origin === "enrollment_schedule";
+    const managedBySchedule = managedByCourse || managedByEnrollment;
     const recoveryCompletionReady =
       !isRecovery ||
       (students.length > 0 &&
@@ -5757,7 +6061,7 @@ if (automaticClosure) {
         }));
     const rescheduleBlocked =
       !isRecovery &&
-      !managedByCourse &&
+      !managedBySchedule &&
       lesson.status === "scheduled" &&
       !canRescheduleLesson(lesson);
     openModal({
@@ -5774,13 +6078,14 @@ if (automaticClosure) {
         ${lesson.cancellation_reason ? `<div class="setting-section"><h3>Motivo annullamento</h3><p class="muted">${escapeHTML(lesson.cancellation_reason)}</p></div>` : ""}
         ${isRecovery && !recoveryCompletionReady ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Registra la presenza o l’assenza di tutti gli allievi assegnati prima di segnare il recupero come svolto.</p></div>` : ""}
         ${managedByCourse ? `<div class="info-callout" style="margin-top:16px">${icon("repeat", 17)}<p><strong>Generata automaticamente dal corso.</strong> Per cambiare giorno, ora, durata o periodo modifica la programmazione del corso; il calendario futuro si aggiornerà insieme.</p></div>` : ""}
+        ${managedByEnrollment ? `<div class="info-callout" style="margin-top:16px">${icon("repeat", 17)}<p><strong>Generata dall’orario fisso dell’allievo.</strong> La programmazione si modifica dalla scheda dell’allievo.</p></div>` : ""}
         ${rescheduleBlocked ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Questa lezione ha già presenze o recuperi collegati: per cambiare data, annullala e creane una nuova.</p></div>` : ""}
       `,
       footer: `
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
         ${
           lesson.status === "scheduled"
-            ? `${managedByCourse ? `<button class="btn btn--secondary" type="button" data-action="edit-course" data-course-id="${escapeHTML(course?.id || "")}">${icon("edit", 15)} Modifica corso</button>` : !isRecovery && !rescheduleBlocked ? `<button class="btn btn--secondary" type="button" data-action="edit-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${icon("edit", 15)} Modifica</button>` : ""}<button class="btn btn--danger" type="button" data-action="open-cancel-lesson" data-lesson-id="${escapeHTML(lesson.id)}">Annulla lezione</button>${recoveryCompletionReady ? `<button class="btn btn--primary" type="button" data-action="update-lesson-status" data-lesson-id="${escapeHTML(lesson.id)}" data-status="completed">${icon("checkSimple", 15)} Segna svolta</button>` : ""}`
+            ? `${managedByCourse ? `<button class="btn btn--secondary" type="button" data-action="edit-course" data-course-id="${escapeHTML(course?.id || "")}">${icon("edit", 15)} Modifica corso</button>` : managedByEnrollment ? `<button class="btn btn--secondary" type="button" data-action="open-individual-schedule" data-student-id="${escapeHTML(lesson.student_id || "")}">${icon("edit", 15)} Modifica orario</button>` : !isRecovery && !rescheduleBlocked ? `<button class="btn btn--secondary" type="button" data-action="edit-lesson" data-lesson-id="${escapeHTML(lesson.id)}">${icon("edit", 15)} Modifica</button>` : ""}<button class="btn btn--danger" type="button" data-action="open-cancel-lesson" data-lesson-id="${escapeHTML(lesson.id)}">Annulla lezione</button>${recoveryCompletionReady ? `<button class="btn btn--primary" type="button" data-action="update-lesson-status" data-lesson-id="${escapeHTML(lesson.id)}" data-status="completed">${icon("checkSimple", 15)} Segna svolta</button>` : ""}`
             : ""
         }
       `,
@@ -7473,6 +7778,13 @@ if (automaticClosure) {
       await handleDeleteStudentAction(actionTarget);
     } else if (action === "prepare-family-welcome-email") {
       await handlePrepareFamilyWelcomeEmailAction(actionTarget);
+    } else if (action === "open-individual-schedule") {
+      openIndividualScheduleModal(actionTarget.dataset.studentId);
+    } else if (action === "open-student-lesson") {
+      openLessonModal(todayKey(), {
+        courseId: actionTarget.dataset.courseId,
+        studentId: actionTarget.dataset.studentId,
+      });
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
     } else if (action === "view-course") {
@@ -7595,6 +7907,25 @@ if (automaticClosure) {
       const location = document.getElementById("lesson-location");
       if (duration && course) duration.value = course.duration_minutes || 50;
       if (location && course) location.value = course.location || "";
+      updateLessonStudentField(
+        event.target.value,
+        document.getElementById("lesson-date")?.value || todayKey(),
+      );
+    } else if (event.target.id === "lesson-date") {
+      const courseId = document.getElementById("lesson-course")?.value;
+      if (courseId) updateLessonStudentField(courseId, event.target.value);
+    } else if (event.target.id === "individual-schedule-mode") {
+      const fixed = event.target.value === "fixed";
+      const fields = document.getElementById("individual-fixed-fields");
+      if (fields) fields.hidden = !fixed;
+      [
+        "individual-weekday",
+        "individual-start-time",
+        "individual-duration",
+      ].forEach((id) => {
+        const input = document.getElementById(id);
+        if (input) input.required = fixed;
+      });
     } else if (event.target.id === "student-family-id") {
       const family = state.data.families.find(
         (item) => item.id === event.target.value,
@@ -7705,6 +8036,46 @@ if (automaticClosure) {
               ? `Il calendario di ${affectedCourses} ${affectedCourses === 1 ? "corso è stato aggiornato" : "corsi è stato aggiornato"}.`
               : "La chiusura è ora visibile nel calendario.",
         );
+      } else if (formId === "individual-schedule-form") {
+        const enrollment = state.data.enrollments.find(
+          (item) => item.id === values.enrollment_id,
+        );
+        const course = enrollment
+          ? state.data.courses.find(
+              (item) => item.id === enrollment.course_id,
+            )
+          : null;
+        if (!enrollment || !course || !isIndividualCourse(course)) {
+          throw new Error(
+            "La programmazione individuale non è disponibile per questa iscrizione.",
+          );
+        }
+        if (values.lesson_schedule_mode === "fixed") {
+          if (!enrollment.ends_on && !course.ends_on) {
+            throw new Error(
+              "Indica prima una data di fine dell’iscrizione per usare l’orario fisso.",
+            );
+          }
+          if (!COURSE_WEEKDAYS[Number(values.lesson_weekday)]) {
+            throw new Error("Scegli un giorno valido.");
+          }
+          if (!/^\d{2}:\d{2}$/.test(values.lesson_start_time || "")) {
+            throw new Error("Indica un orario valido.");
+          }
+          const duration = Number(values.lesson_duration_minutes);
+          if (!Number.isFinite(duration) || duration < 15 || duration > 240) {
+            throw new Error("La durata deve essere compresa tra 15 e 240 minuti.");
+          }
+        }
+        await state.store.saveIndividualSchedule(values);
+        closeModal();
+        await refreshData();
+        toast(
+          "Programmazione aggiornata",
+          values.lesson_schedule_mode === "fixed"
+            ? "Le lezioni settimanali dell’allievo sono state aggiornate nel calendario."
+            : "Ora puoi inserire ogni appuntamento dalla scheda dell’allievo.",
+        );
       } else if (formId === "lesson-form") {
         if (schoolClosureForDate(values.date)) {
           throw new Error(
@@ -7718,6 +8089,35 @@ if (automaticClosure) {
         const course = state.data.courses.find(
           (item) => item.id === values.course_id,
         );
+        if (!course) throw new Error("Scegli un corso valido.");
+        if (isIndividualCourse(course)) {
+          if (!values.student_id) {
+            throw new Error("Scegli l’allievo per l’appuntamento individuale.");
+          }
+          const enrollment = state.data.enrollments.find(
+            (item) =>
+              item.student_id === values.student_id &&
+              item.course_id === course.id &&
+              item.is_active !== false &&
+              (!item.starts_on || item.starts_on <= values.date) &&
+              (!item.ends_on || item.ends_on >= values.date),
+          );
+          if (!enrollment) {
+            throw new Error(
+              "L’allievo non risulta iscritto al corso nella data scelta.",
+            );
+          }
+          values.enrollment_id = enrollment.id;
+          if (enrollmentScheduleMode(enrollment) === "course") {
+            await state.store.saveIndividualSchedule({
+              enrollment_id: enrollment.id,
+              lesson_schedule_mode: "variable",
+            });
+          }
+        } else {
+          values.student_id = null;
+          values.enrollment_id = null;
+        }
         await state.store.saveLesson({
           ...values,
           starts_at: start.toISOString(),
@@ -7729,8 +8129,10 @@ if (automaticClosure) {
         closeModal();
         await refreshData();
         toast(
-          "Lezione creata",
-          "La data è ora nel calendario. Le serie ordinarie restano collegate al corso.",
+          isIndividualCourse(course) ? "Appuntamento creato" : "Lezione creata",
+          isIndividualCourse(course)
+            ? "La data è nel calendario dell’allievo e nel registro presenze."
+            : "La data è ora nel calendario. Le serie ordinarie restano collegate al corso.",
         );
       } else if (formId === "edit-lesson-form") {
         if (schoolClosureForDate(values.date)) {
