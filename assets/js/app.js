@@ -5639,20 +5639,20 @@ function schoolClosuresForStudent(studentId) {
   function bankDetails(invoice) {
     const settings = state.data.settings || {};
     const student = studentForInvoice(invoice);
-    const reference = String(
-      settings.bank_reference_template || BANK_REFERENCE_TEMPLATE,
-    )
-      .replace(/\{nome\}/gi, student?.first_name || "")
-      .replace(/\{cognome\}/gi, student?.last_name || "")
-      .replace(/\{allievo\}/gi, fullName(student))
-      .replace(/\{numero(?:\s+fattura)?\}/gi, invoice.number || "");
+    const reference = invoice
+      ? String(settings.bank_reference_template || BANK_REFERENCE_TEMPLATE)
+          .replace(/\{nome\}/gi, student?.first_name || "")
+          .replace(/\{cognome\}/gi, student?.last_name || "")
+          .replace(/\{allievo\}/gi, fullName(student))
+          .replace(/\{numero(?:\s+fattura)?\}/gi, invoice.number || "")
+      : "";
     return `
       <div class="bank-box">
         <div class="bank-box__row"><span>Intestazione</span><strong>${escapeHTML(settings.bank_account_holder || "Da comunicare")} ${settings.bank_account_holder ? `<button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(settings.bank_account_holder)}">${icon("copy", 11)} Copia</button>` : ""}</strong></div>
         <div class="bank-box__row"><span>IBAN</span><strong>${escapeHTML(settings.bank_iban || "Da comunicare")} ${settings.bank_iban ? `<button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(settings.bank_iban)}">${icon("copy", 11)} Copia</button>` : ""}</strong></div>
         ${settings.bank_bic ? `<div class="bank-box__row"><span>BIC/SWIFT</span><strong>${escapeHTML(settings.bank_bic)}</strong></div>` : ""}
-        <div class="bank-box__row"><span>Importo</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
-        <div class="bank-box__row"><span>Causale</span><strong>${escapeHTML(reference)} <button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(reference)}">${icon("copy", 11)} Copia</button></strong></div>
+        ${invoice ? `<div class="bank-box__row"><span>Importo</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>` : ""}
+        ${invoice ? `<div class="bank-box__row"><span>Causale</span><strong>${escapeHTML(reference)} <button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(reference)}">${icon("copy", 11)} Copia</button></strong></div>` : `<div class="bank-box__row"><span>Causale</span><strong>Nessuna scadenza insoluta</strong></div>`}
       </div>
     `;
   }
@@ -5693,9 +5693,9 @@ function schoolClosuresForStudent(studentId) {
           <header class="card-header"><div><h2>Pagamento sicuro</h2><p>PayPal oppure bonifico bancario</p></div></header>
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("card", 16)}</span><span class="activity-copy"><strong>PayPal</strong><span>Paga dal profilo PayPal di Quarto MoVimento.</span></span><a class="btn btn--yellow btn--sm" href="${PAYPAL_ME_URL}" target="_blank" rel="noopener noreferrer">Apri PayPal</a></div>
-            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>${bankInvoice ? "Coordinate e causale dell’ultima scadenza insoluta sono pronte qui sotto." : "Non ci sono scadenze da saldare con bonifico."}</span></span></div>
+            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>${bankInvoice ? "Coordinate e causale dell’ultima scadenza insoluta sono pronte qui sotto." : "Le coordinate bancarie restano sempre disponibili qui sotto."}</span></span></div>
           </div>
-          ${bankInvoice ? `<div class="setting-section" style="margin-top:16px"><h3>Dati per il bonifico</h3>${bankDetails(bankInvoice)}</div>` : ""}
+          <div class="setting-section" style="margin-top:16px"><h3>Dati per il bonifico</h3>${bankDetails(bankInvoice)}</div>
           <p class="subtle" style="margin:12px 0 0;font-size:10px">I dati PayPal sono gestiti da PayPal. L’app non memorizza dati di carta.</p>
         </article>
       </section>
