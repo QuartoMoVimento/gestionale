@@ -1179,6 +1179,44 @@ h4 {
   cursor: pointer;
 }
 
+.admin-preview-banner {
+  display: flex;
+  margin-bottom: 22px;
+  padding: 12px 14px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid rgba(15, 143, 159, 0.28);
+  border-radius: 14px;
+  gap: 14px;
+  color: var(--brand-blue);
+  background: var(--brand-aqua-soft);
+}
+
+.admin-preview-banner > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-preview-banner > span > span {
+  display: grid;
+  gap: 2px;
+}
+
+.admin-preview-banner strong {
+  font-size: 13px;
+}
+
+.admin-preview-banner small {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.admin-preview-banner .btn {
+  flex: 0 0 auto;
+}
+
 .bottom-nav {
   display: none;
 }
@@ -3085,6 +3123,15 @@ h4 {
     flex: 1;
   }
 
+  .admin-preview-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-preview-banner .btn {
+    width: 100%;
+  }
+
   .support-actions {
     width: 100%;
   }
@@ -3343,6 +3390,7 @@ h4 {
   .bottom-nav,
   .page-actions,
   .demo-banner,
+  .admin-preview-banner,
   .toolbar {
     display: none !important;
   }

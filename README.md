@@ -30,6 +30,8 @@ Area amministrativa:
   calendario, oltre a lezioni singole e recuperi;
 - lezioni individuali gestite dalla scheda dell'allievo, con orario fisso
   settimanale oppure appuntamenti variabili;
+- anteprima dell'area famiglia, riservata all'account amministrativo di Valeria,
+  avviabile dalla scheda dell'allievo e con ritorno immediato alla gestione;
 - date di **chiusura per festività** che rimuovono dal calendario le lezioni
   ordinarie senza generare assenze o recuperi;
 - registrazione giornaliera di presenze e assenze;

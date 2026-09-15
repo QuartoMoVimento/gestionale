@@ -14,6 +14,7 @@
 
   const ROLE_ADMIN = "admin";
   const ROLE_FAMILY = "family";
+  const FAMILY_PREVIEW_ADMIN_EMAIL = "quartomov@gmail.com";
   const WHATSAPP_URL =
     "https://api.whatsapp.com/send/?phone=%2B393277749860&text&type=phone_number&app_absent=0";
   const TIDYCAL_URL = "https://tidycal.com/quartomov/chiamata-informativa";
@@ -65,6 +66,8 @@
     authListener: null,
     paymentReminderChannel: null,
     familyAccountStatuses: {},
+    adminFamilyPreview: null,
+    adminDataSnapshot: null,
     authFingerprint: null,
     lastDataRefreshAt: 0,
   };
@@ -983,6 +986,76 @@ function schoolClosuresForStudent(studentId) {
     return student && state.data
       ? state.data.families.find((item) => item.id === student.family_id)
       : null;
+  }
+
+  function canUseAdminFamilyPreview() {
+    return (
+      state.mode === "production" &&
+      state.profile?.role === ROLE_ADMIN &&
+      normalizeEmailList([state.user?.email])[0] ===
+        FAMILY_PREVIEW_ADMIN_EMAIL
+    );
+  }
+
+  function dataForFamilyPreview(source, familyId) {
+    const students = source.students.filter(
+      (item) => item.family_id === familyId && item.is_active !== false,
+    );
+    const studentIds = new Set(students.map((item) => item.id));
+    const enrollments = source.enrollments.filter((item) =>
+      studentIds.has(item.student_id),
+    );
+    const courseIds = new Set(enrollments.map((item) => item.course_id));
+    const makeupCredits = source.makeupCredits.filter((item) =>
+      studentIds.has(item.student_id),
+    );
+    const assignedLessonIds = new Set(
+      makeupCredits
+        .map((item) => item.used_lesson_id)
+        .filter(Boolean),
+    );
+    const lessons = source.lessons.filter(
+      (item) =>
+        (courseIds.has(item.course_id) || assignedLessonIds.has(item.id)) &&
+        (!item.student_id || studentIds.has(item.student_id)),
+    );
+    const lessonIds = new Set(lessons.map((item) => item.id));
+    const invoices = source.invoices.filter(
+      (item) =>
+        item.family_id === familyId &&
+        (!item.student_id || studentIds.has(item.student_id)),
+    );
+    const invoiceIds = new Set(invoices.map((item) => item.id));
+
+    return {
+      ...source,
+      families: source.families.filter((item) => item.id === familyId),
+      familyUsers: (source.familyUsers || []).filter(
+        (item) => item.family_id === familyId,
+      ),
+      familyAccessEmails: (source.familyAccessEmails || []).filter(
+        (item) => item.family_id === familyId,
+      ),
+      students,
+      enrollments,
+      courses: source.courses.filter((item) => courseIds.has(item.id)),
+      lessons,
+      attendance: source.attendance.filter(
+        (item) =>
+          studentIds.has(item.student_id) && lessonIds.has(item.lesson_id),
+      ),
+      invoices,
+      payments: source.payments.filter((item) =>
+        invoiceIds.has(item.invoice_id),
+      ),
+      bankTransferNotices: source.bankTransferNotices.filter((item) =>
+        invoiceIds.has(item.invoice_id),
+      ),
+      paymentReminders: (source.paymentReminders || []).filter((item) =>
+        invoiceIds.has(item.invoice_id),
+      ),
+      makeupCredits,
+    };
   }
 
   function familyLinkedAccessEmails(familyOrId) {
@@ -3208,11 +3281,19 @@ function schoolClosuresForStudent(studentId) {
   function renderShell() {
     const { prefix, route } = routeInfo();
     const nav = state.role === ROLE_ADMIN ? adminNav() : familyNav();
-    const displayName =
-      state.profile?.display_name ||
-      state.profile?.full_name ||
-      (state.role === ROLE_ADMIN ? "Valeria" : "Famiglia Bianchi");
-    const email = state.user?.email || "anteprima@quartomovimento.it";
+    const previewFamily = state.adminFamilyPreview
+      ? state.data.families.find(
+          (item) => item.id === state.adminFamilyPreview.familyId,
+        )
+      : null;
+    const displayName = state.adminFamilyPreview
+      ? previewFamily?.guardian_name || previewFamily?.display_name || "Famiglia"
+      : state.profile?.display_name ||
+        state.profile?.full_name ||
+        (state.role === ROLE_ADMIN ? "Valeria" : "Famiglia Bianchi");
+    const email = state.adminFamilyPreview
+      ? previewFamily?.email || ""
+      : state.user?.email || "anteprima@quartomovimento.it";
     const routeLabel =
       nav.find((item) => item[0] === route)?.[1] || "Area corsi";
     const view =
@@ -3266,6 +3347,16 @@ function schoolClosuresForStudent(studentId) {
             </div>
           </header>
           <main class="content" id="main-content">
+            ${
+              state.adminFamilyPreview
+                ? `
+                  <div class="admin-preview-banner" role="status">
+                    <span>${icon("eye", 18)} <span><strong>Anteprima area famiglia</strong><small>Stai visualizzando i dati reali di ${escapeHTML(previewFamily?.display_name || previewFamily?.guardian_name || "questa famiglia")}.</small></span></span>
+                    <button class="btn btn--primary btn--sm" type="button" data-action="exit-admin-family-preview">${icon("arrowRight", 15)} Torna all’area amministrativa</button>
+                  </div>
+                `
+                : ""
+            }
             ${
               state.mode === "demo" && state.demoBannerVisible
                 ? `
@@ -4916,10 +5007,11 @@ function schoolClosuresForStudent(studentId) {
       0,
     );
     const family = familyForStudent(student);
-    const firstName =
-      state.profile?.display_name?.split(" ")[0] ||
-      family?.guardian_name?.split(" ")[0] ||
-      "famiglia";
+    const firstName = state.adminFamilyPreview
+      ? family?.guardian_name?.split(" ")[0] || "famiglia"
+      : state.profile?.display_name?.split(" ")[0] ||
+        family?.guardian_name?.split(" ")[0] ||
+        "famiglia";
 
     return `
       ${pageHeader(
@@ -5691,6 +5783,7 @@ function schoolClosuresForStudent(studentId) {
       `,
       footer: `
         <button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina</button>
+        ${canUseAdminFamilyPreview() ? `<button class="btn btn--secondary" type="button" data-action="enter-admin-family-preview" data-student-id="${escapeHTML(student.id)}">${icon("eye", 15)} Vedi area famiglia</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
         <button class="btn btn--primary" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}">${icon("edit", 15)} Modifica</button>
       `,
@@ -6534,7 +6627,16 @@ if (automaticClosure) {
   }
 
   async function refreshData(render) {
-    state.data = await state.store.loadData(state.role);
+    const preview = state.adminFamilyPreview;
+    const loadedData = await state.store.loadData(
+      preview ? ROLE_ADMIN : state.role,
+    );
+    if (preview) {
+      state.adminDataSnapshot = loadedData;
+      state.data = dataForFamilyPreview(loadedData, preview.familyId);
+    } else {
+      state.data = loadedData;
+    }
     if (!Array.isArray(state.data.schoolClosures)) {
       state.data.schoolClosures = [];
     }
@@ -6549,6 +6651,63 @@ if (automaticClosure) {
       state.selectedStudentId = state.data.students[0]?.id || null;
     }
     if (render !== false) renderShell();
+  }
+
+  async function enterAdminFamilyPreview(studentId) {
+    if (!canUseAdminFamilyPreview() || state.role !== ROLE_ADMIN) {
+      toast(
+        "Anteprima non disponibile",
+        "Questa funzione è riservata all’account amministrativo di Valeria.",
+        "error",
+      );
+      return;
+    }
+    const source = state.adminDataSnapshot || state.data;
+    const student = source.students.find((item) => item.id === studentId);
+    const family = student
+      ? source.families.find((item) => item.id === student.family_id)
+      : null;
+    if (!student || !family) {
+      toast(
+        "Famiglia non trovata",
+        "Non è possibile aprire l’anteprima per questo allievo.",
+        "error",
+      );
+      return;
+    }
+
+    await stopPaymentReminderRealtime();
+    state.adminDataSnapshot = source;
+    state.adminFamilyPreview = {
+      familyId: family.id,
+      studentId: student.id,
+      returnHash: window.location.hash.startsWith("#/admin/")
+        ? window.location.hash
+        : "#/admin/students",
+    };
+    state.role = ROLE_FAMILY;
+    state.data = dataForFamilyPreview(source, family.id);
+    state.selectedStudentId = student.id;
+    closeModal();
+    replaceAppRoute("#/famiglia/home", true);
+    renderShell();
+  }
+
+  async function exitAdminFamilyPreview() {
+    const preview = state.adminFamilyPreview;
+    if (!preview || state.profile?.role !== ROLE_ADMIN) return;
+
+    closeModal();
+    await stopPaymentReminderRealtime();
+    state.role = ROLE_ADMIN;
+    state.adminFamilyPreview = null;
+    state.data =
+      state.adminDataSnapshot || (await state.store.loadData(ROLE_ADMIN));
+    state.adminDataSnapshot = null;
+    state.selectedStudentId = null;
+    replaceAppRoute(preview.returnHash || "#/admin/students", false);
+    renderShell();
+    toast("Area amministrativa", "Sei tornata alla gestione completa.");
   }
 
   let paymentReminderRealtimeRefreshInFlight = false;
@@ -7143,6 +7302,8 @@ if (automaticClosure) {
     state.role = null;
     state.data = null;
     state.familyAccountStatuses = {};
+    state.adminFamilyPreview = null;
+    state.adminDataSnapshot = null;
     state.selectedStudentId = null;
     state.store =
       state.mode === "demo" ? new DemoStore() : new SupabaseStore(state.supabase);
@@ -7432,6 +7593,8 @@ if (automaticClosure) {
       await sendPasswordReset();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "exit-admin-family-preview") {
+      await exitAdminFamilyPreview();
     } else if (action === "reload-page") {
       window.location.reload();
     } else if (action === "dismiss-demo-banner") {
@@ -7652,6 +7815,8 @@ if (automaticClosure) {
     const action = actionTarget.dataset.action;
     if (action === "close-modal") {
       closeModal();
+    } else if (action === "enter-admin-family-preview") {
+      await enterAdminFamilyPreview(actionTarget.dataset.studentId);
     } else if (action === "open-school-closure-modal") {
       openSchoolClosureModal(actionTarget.dataset.date);
     } else if (action === "delete-school-closure") {
@@ -8372,6 +8537,8 @@ if (automaticClosure) {
               state.role = null;
               state.data = null;
               state.familyAccountStatuses = {};
+              state.adminFamilyPreview = null;
+              state.adminDataSnapshot = null;
               renderLogin();
             } else if (
               authSession?.user &&
