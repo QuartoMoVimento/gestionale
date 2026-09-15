@@ -20,7 +20,8 @@
   const TIDYCAL_URL = "https://tidycal.com/quartomov/chiamata-informativa";
   const PAYPAL_ME_URL =
     "https://paypal.me/quartomov?locale.x=it_IT&country.x=IT";
-  const BANK_REFERENCE_TEMPLATE = "{nome}, {cognome}, {numero}";
+  const BANK_REFERENCE_TEMPLATE =
+    "{nome} {cognome} saldo fattura {numero}";
   const AUTH_EMAIL_COOLDOWN_KEY = "qm_auth_email_cooldown_until";
   const AUTH_EMAIL_COOLDOWN_MS = 60 * 1000;
   const AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -426,6 +427,16 @@
         ["submitted", "verified"].includes(notice.status),
     );
     return !hasActivePayment && !hasActiveNotice;
+  }
+
+  function invoiceCanBePermanentlyDeleted(invoice) {
+    if (!invoice || state.role !== ROLE_ADMIN) return false;
+    return paymentsForInvoice(invoice.id).every(
+      (payment) =>
+        payment.provider === "manual" &&
+        !payment.provider_order_id &&
+        !payment.provider_capture_id,
+    );
   }
 
   function invoiceReminderThresholdReached(invoice) {
@@ -2300,6 +2311,87 @@ function schoolClosuresForStudent(studentId) {
       return invoice;
     }
 
+    async updateInvoice(payload) {
+      const invoice = this.data.invoices.find(
+        (item) => item.id === payload.invoiceId,
+      );
+      if (!invoice || invoice.status === "void") {
+        throw new Error("Scadenza non modificabile.");
+      }
+      const paidCents = this.data.payments
+        .filter(
+          (item) =>
+            item.invoice_id === invoice.id &&
+            ["completed", "partially_refunded", "refunded"].includes(
+              item.status,
+            ),
+        )
+        .reduce(
+          (sum, item) =>
+            sum +
+            Math.max(
+              0,
+              Number(item.amount_cents || 0) -
+                Number(item.refunded_cents || 0),
+            ),
+          0,
+        );
+      if (payload.totalCents < paidCents) {
+        throw new Error(
+          "L’importo totale non può essere inferiore a quanto già incassato.",
+        );
+      }
+      Object.assign(invoice, {
+        number: payload.number,
+        title: payload.title,
+        description: payload.description,
+        total_cents: payload.totalCents,
+        due_date: payload.dueDate,
+        status: paidCents >= payload.totalCents && paidCents > 0
+          ? "paid"
+          : paidCents > 0
+            ? "partially_paid"
+            : payload.dueDate < todayKey()
+              ? "overdue"
+              : "pending",
+        updated_at: new Date().toISOString(),
+      });
+      return invoice;
+    }
+
+    async deleteTestInvoice(invoiceId, reason) {
+      const invoice = this.data.invoices.find((item) => item.id === invoiceId);
+      if (!invoice) throw new Error("Scadenza non trovata.");
+      const payments = this.data.payments.filter(
+        (item) => item.invoice_id === invoiceId,
+      );
+      if (
+        payments.some(
+          (item) =>
+            item.provider !== "manual" ||
+            item.provider_order_id ||
+            item.provider_capture_id,
+        )
+      ) {
+        throw new Error(
+          "Le transazioni PayPal reali non possono essere eliminate.",
+        );
+      }
+      this.data.paymentReminders = (this.data.paymentReminders || []).filter(
+        (item) => item.invoice_id !== invoiceId,
+      );
+      this.data.bankTransferNotices = this.data.bankTransferNotices.filter(
+        (item) => item.invoice_id !== invoiceId,
+      );
+      this.data.payments = this.data.payments.filter(
+        (item) => item.invoice_id !== invoiceId,
+      );
+      this.data.invoices = this.data.invoices.filter(
+        (item) => item.id !== invoiceId,
+      );
+      return { deleted: true, invoice_id: invoiceId, reason };
+    }
+
     async markInvoicePaid(invoiceId, method, paidOn) {
       const invoice = this.data.invoices.find((item) => item.id === invoiceId);
       if (!invoice) throw new Error("Scadenza non trovata.");
@@ -2323,6 +2415,104 @@ function schoolClosuresForStudent(studentId) {
       invoice.status = "paid";
       invoice.payment_method = method || "bank_transfer";
       invoice.paid_at = paidAt;
+    }
+
+    async updateManualPayment(payload) {
+      const payment = this.data.payments.find(
+        (item) => item.id === payload.paymentId,
+      );
+      if (
+        !payment ||
+        payment.provider !== "manual" ||
+        payment.status !== "completed" ||
+        payment.idempotency_key
+      ) {
+        throw new Error("Questo incasso non può essere modificato.");
+      }
+      const invoice = this.data.invoices.find(
+        (item) => item.id === payment.invoice_id,
+      );
+      const otherPaid = this.data.payments
+        .filter(
+          (item) =>
+            item.id !== payment.id &&
+            item.invoice_id === payment.invoice_id &&
+            ["completed", "partially_refunded", "refunded"].includes(
+              item.status,
+            ),
+        )
+        .reduce(
+          (sum, item) =>
+            sum +
+            Math.max(
+              0,
+              Number(item.amount_cents || 0) -
+                Number(item.refunded_cents || 0),
+            ),
+          0,
+        );
+      if (
+        invoice &&
+        otherPaid + payload.amountCents > Number(invoice.total_cents || 0)
+      ) {
+        throw new Error("L’importo supererebbe il totale della scadenza.");
+      }
+      const previous = {
+        amount_cents: payment.amount_cents,
+        method: payment.method,
+        paid_at: payment.paid_at,
+        reference: payment.reference || null,
+      };
+      payment.amount_cents = payload.amountCents;
+      payment.method = payload.method;
+      payment.paid_at = paymentPaidAtISO(payload.paidOn);
+      payment.reference = payload.reference || null;
+      payment.updated_at = new Date().toISOString();
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        manual_edit_history: [
+          ...(payment.metadata?.manual_edit_history || []),
+          { edited_at: payment.updated_at, edited_by: "demo-admin", previous },
+        ],
+      };
+
+      if (invoice) {
+        const activePayments = this.data.payments.filter(
+          (item) =>
+            item.invoice_id === invoice.id &&
+            ["completed", "partially_refunded", "refunded"].includes(
+              item.status,
+            ),
+        );
+        const paid = activePayments.reduce(
+          (sum, item) =>
+            sum +
+            Math.max(
+              0,
+              Number(item.amount_cents || 0) -
+                Number(item.refunded_cents || 0),
+            ),
+          0,
+        );
+        invoice.status = paid >= invoice.total_cents
+          ? "paid"
+          : paid > 0
+            ? "partially_paid"
+            : "pending";
+        invoice.payment_method = invoice.status === "paid"
+          ? [...activePayments].sort(
+              (a, b) => new Date(b.paid_at) - new Date(a.paid_at),
+            )[0]?.method || null
+          : null;
+        invoice.paid_at = invoice.status === "paid"
+          ? [...activePayments]
+              .map((item) => item.paid_at)
+              .filter(Boolean)
+              .sort()
+              .at(-1) || null
+          : null;
+      }
+      return payment;
     }
 
     async voidInvoice(invoiceId, reason) {
@@ -2953,6 +3143,28 @@ function schoolClosuresForStudent(studentId) {
       return data;
     }
 
+    async updateInvoice(payload) {
+      const { data, error } = await this.client.rpc("admin_update_invoice", {
+        p_invoice_id: payload.invoiceId,
+        p_number: payload.number,
+        p_title: payload.title,
+        p_description: payload.description || "",
+        p_total_cents: payload.totalCents,
+        p_due_date: payload.dueDate,
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async deleteTestInvoice(invoiceId, reason) {
+      const { data, error } = await this.client.rpc(
+        "admin_delete_test_invoice",
+        { p_invoice_id: invoiceId, p_reason: reason },
+      );
+      if (error) throw error;
+      return data;
+    }
+
     async markInvoicePaid(invoiceId, method, paidOn) {
       const paidAt = paymentPaidAtISO(paidOn);
       const { data, error } = await this.client.rpc("admin_mark_invoice_paid", {
@@ -2973,6 +3185,21 @@ function schoolClosuresForStudent(studentId) {
         })
         .eq("id", invoiceId);
       if (updateError) throw updateError;
+    }
+
+    async updateManualPayment(payload) {
+      const { data, error } = await this.client.rpc(
+        "admin_update_manual_payment",
+        {
+          p_payment_id: payload.paymentId,
+          p_amount_cents: payload.amountCents,
+          p_method: payload.method,
+          p_paid_at: paymentPaidAtISO(payload.paidOn),
+          p_reference: payload.reference || null,
+        },
+      );
+      if (error) throw error;
+      return data;
     }
 
     async voidInvoice(invoiceId, reason) {
@@ -4580,6 +4807,7 @@ function schoolClosuresForStudent(studentId) {
           <div class="row-actions">
             ${statusBadge("invoice", invoicePaymentStatus(invoice))}
             <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
+            ${status !== "void" ? `<button class="row-action" type="button" data-action="open-edit-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Modifica scadenza" title="Modifica scadenza e numero fattura">${icon("edit", 16)}</button>` : ""}
             ${invoiceCanBeVoided(invoice) ? `<button class="row-action" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Elimina scadenza">${icon("trash", 16)}</button>` : ""}
           </div>
         </div>
@@ -4707,6 +4935,7 @@ function schoolClosuresForStudent(studentId) {
                             <td>
                               <div class="row-actions">
                                 <button class="row-action" type="button" data-action="view-invoice" data-invoice-id="${escapeHTML(invoice.id)}" aria-label="Dettagli">${icon("eye", 16)}</button>
+                                ${status !== "void" ? `<button class="row-action" type="button" data-action="open-edit-invoice" data-invoice-id="${escapeHTML(invoice.id)}" title="Modifica scadenza e numero fattura" aria-label="Modifica scadenza">${icon("edit", 16)}</button>` : ""}
                                 ${canSendReminder ? `<button class="row-action" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}" title="Invia notifica alla famiglia" aria-label="Invia promemoria di pagamento">${icon("bell", 16)}</button>` : ""}
                                 ${reminder ? `<button class="row-action" type="button" disabled title="Promemoria inviato il ${escapeHTML(formatDate(reminder.sent_at || reminder.created_at))}" aria-label="Promemoria già inviato">${icon("bell", 16)}</button>` : ""}
                                 ${
@@ -4830,7 +5059,7 @@ function schoolClosuresForStudent(studentId) {
               <div class="field"><label for="bank-holder">Intestatario</label><input class="input" id="bank-holder" name="bank_account_holder" value="${escapeHTML(settings.bank_account_holder || "")}" /></div>
               <div class="field"><label for="bank-iban">IBAN</label><input class="input" id="bank-iban" name="bank_iban" value="${escapeHTML(settings.bank_iban || "")}" autocomplete="off" /></div>
               <div class="field"><label for="bank-bic">BIC/SWIFT</label><input class="input" id="bank-bic" name="bank_bic" value="${escapeHTML(settings.bank_bic || "")}" /></div>
-              <div class="field"><label for="bank-reference">Modello causale</label><input class="input" id="bank-reference" name="bank_reference_template" value="${escapeHTML(settings.bank_reference_template || BANK_REFERENCE_TEMPLATE)}" /><p class="field-hint">Usa {nome}, {cognome} e {numero}: la famiglia vedrà la causale già compilata.</p></div>
+              <div class="field"><label for="bank-reference">Modello causale</label><input class="input" id="bank-reference" name="bank_reference_template" value="${escapeHTML(settings.bank_reference_template || BANK_REFERENCE_TEMPLATE)}" /><p class="field-hint">Usa {nome}, {cognome}, {allievo} e {numero}: la famiglia vedrà la causale già compilata.</p></div>
             </div>
           </div>
           <div class="setting-section">
@@ -5419,7 +5648,7 @@ function schoolClosuresForStudent(studentId) {
       .replace(/\{numero(?:\s+fattura)?\}/gi, invoice.number || "");
     return `
       <div class="bank-box">
-        <div class="bank-box__row"><span>Intestatario</span><strong>${escapeHTML(settings.bank_account_holder || "Da comunicare")}</strong></div>
+        <div class="bank-box__row"><span>Intestazione</span><strong>${escapeHTML(settings.bank_account_holder || "Da comunicare")} ${settings.bank_account_holder ? `<button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(settings.bank_account_holder)}">${icon("copy", 11)} Copia</button>` : ""}</strong></div>
         <div class="bank-box__row"><span>IBAN</span><strong>${escapeHTML(settings.bank_iban || "Da comunicare")} ${settings.bank_iban ? `<button class="copy-button" type="button" data-action="copy-value" data-value="${escapeHTML(settings.bank_iban)}">${icon("copy", 11)} Copia</button>` : ""}</strong></div>
         ${settings.bank_bic ? `<div class="bank-box__row"><span>BIC/SWIFT</span><strong>${escapeHTML(settings.bank_bic)}</strong></div>` : ""}
         <div class="bank-box__row"><span>Importo</span><strong>${escapeHTML(formatMoney(invoiceOutstandingCents(invoice), invoice.currency))}</strong></div>
@@ -5440,6 +5669,7 @@ function schoolClosuresForStudent(studentId) {
     const nextInvoice = open.find(
       (item) => invoiceEffectiveStatus(item) !== "processing",
     );
+    const bankInvoice = nextInvoice || open[0] || null;
 
     return `
       ${pageHeader(
@@ -5463,8 +5693,9 @@ function schoolClosuresForStudent(studentId) {
           <header class="card-header"><div><h2>Pagamento sicuro</h2><p>PayPal oppure bonifico bancario</p></div></header>
           <div class="activity-list">
             <div class="activity-item"><span class="activity-icon">${icon("card", 16)}</span><span class="activity-copy"><strong>PayPal</strong><span>Paga dal profilo PayPal di Quarto MoVimento.</span></span><a class="btn btn--yellow btn--sm" href="${PAYPAL_ME_URL}" target="_blank" rel="noopener noreferrer">Apri PayPal</a></div>
-            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>Usa come causale nome, cognome e numero fattura.</span></span></div>
+            <div class="activity-item"><span class="activity-icon">${icon("bank", 16)}</span><span class="activity-copy"><strong>Bonifico</strong><span>${bankInvoice ? "Coordinate e causale dell’ultima scadenza insoluta sono pronte qui sotto." : "Non ci sono scadenze da saldare con bonifico."}</span></span></div>
           </div>
+          ${bankInvoice ? `<div class="setting-section" style="margin-top:16px"><h3>Dati per il bonifico</h3>${bankDetails(bankInvoice)}</div>` : ""}
           <p class="subtle" style="margin:12px 0 0;font-size:10px">I dati PayPal sono gestiti da PayPal. L’app non memorizza dati di carta.</p>
         </article>
       </section>
@@ -6281,29 +6512,33 @@ if (automaticClosure) {
     });
   }
 
-  function openInvoiceModal() {
+  function openInvoiceModal(invoiceId) {
+    const invoice = invoiceId
+      ? state.data.invoices.find((item) => item.id === invoiceId)
+      : null;
+    if (invoiceId && (!invoice || invoice.status === "void")) return;
+    const student = invoice ? studentForInvoice(invoice) : null;
+    const minimumCents = invoice ? Math.max(1, invoicePaidCents(invoice)) : 1;
     openModal({
-      title: "Nuova scadenza",
-      subtitle: "Crea una quota, una rata o un’altra voce da pagare.",
+      title: invoice ? "Modifica scadenza" : "Nuova scadenza",
+      subtitle: invoice
+        ? `${invoice.number} · ${fullName(student)}`
+        : "Crea una quota, una rata o un’altra voce da pagare.",
       body: `
         <form id="invoice-form">
+          ${invoice ? `<input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />` : ""}
           <div class="form-grid">
-            <div class="field field--full"><label for="invoice-student">Allievo</label><select class="select" id="invoice-student" name="student_id" required><option value="">Scegli l’allievo</option>${state.data.students
-              .filter((item) => item.is_active !== false)
-              .map(
-                (student) =>
-                  `<option value="${escapeHTML(student.id)}">${escapeHTML(fullName(student))}</option>`,
-              )
-              .join("")}</select></div>
-            <div class="field field--full"><label for="invoice-title">Voce</label><input class="input" id="invoice-title" name="title" placeholder="Es. Seconda rata abbonamento" required /></div>
-            <div class="field field--full"><label for="invoice-description">Descrizione</label><input class="input" id="invoice-description" name="description" placeholder="Facoltativa" /></div>
-            <div class="field"><label for="invoice-amount">Importo (€)</label><input class="input" id="invoice-amount" name="amount_eur" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div>
-            <div class="field"><label for="invoice-due">Scadenza</label><input class="input" id="invoice-due" name="due_date" type="date" value="${escapeHTML(todayKey())}" required /></div>
-            <div class="field field--full"><label for="invoice-number">Numero fattura</label><input class="input" id="invoice-number" name="number" placeholder="Generato automaticamente se lasciato vuoto" /></div>
+            ${invoice ? `<div class="field field--full"><label for="invoice-student-display">Allievo</label><input class="input" id="invoice-student-display" value="${escapeHTML(fullName(student))}" readonly /></div>` : `<div class="field field--full"><label for="invoice-student">Allievo</label><select class="select" id="invoice-student" name="student_id" required><option value="">Scegli l’allievo</option>${state.data.students.filter((item) => item.is_active !== false).map((item) => `<option value="${escapeHTML(item.id)}">${escapeHTML(fullName(item))}</option>`).join("")}</select></div>`}
+            <div class="field field--full"><label for="invoice-title">Voce</label><input class="input" id="invoice-title" name="title" maxlength="200" value="${escapeHTML(invoice?.title || "")}" placeholder="Es. Seconda rata abbonamento" required /></div>
+            <div class="field field--full"><label for="invoice-description">Descrizione</label><input class="input" id="invoice-description" name="description" maxlength="1000" value="${escapeHTML(invoice?.description || "")}" placeholder="Facoltativa" /></div>
+            <div class="field"><label for="invoice-amount">Importo (€)</label><input class="input" id="invoice-amount" name="amount_eur" type="number" min="${escapeHTML((minimumCents / 100).toFixed(2))}" step="0.01" inputmode="decimal" value="${invoice ? escapeHTML((Number(invoice.total_cents || 0) / 100).toFixed(2)) : ""}" required />${invoicePaidCents(invoice) > 0 ? `<p class="field-hint">Non può essere inferiore a ${escapeHTML(formatMoney(invoicePaidCents(invoice), invoice.currency))}, già incassati.</p>` : ""}</div>
+            <div class="field"><label for="invoice-due">Scadenza</label><input class="input" id="invoice-due" name="due_date" type="date" value="${escapeHTML(invoice?.due_date || todayKey())}" required /></div>
+            <div class="field field--full"><label for="invoice-number">Numero fattura</label><input class="input" id="invoice-number" name="number" maxlength="100" value="${escapeHTML(invoice?.number || "")}" placeholder="Generato automaticamente se lasciato vuoto"${invoice ? " required" : ""} /></div>
           </div>
+          ${invoice ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Se modifichi importo o scadenza, il saldo e lo stato verranno ricalcolati automaticamente.</p></div>` : ""}
         </form>
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="invoice-form">Crea scadenza</button>`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="invoice-form">${icon(invoice ? "edit" : "plus", 15)} ${invoice ? "Salva modifiche" : "Crea scadenza"}</button>`,
     });
   }
 
@@ -6317,6 +6552,7 @@ if (automaticClosure) {
     const status = invoiceEffectiveStatus(invoice);
     const reminder = paymentReminderForInvoice(invoice.id);
     const canSendReminder = canSendPaymentReminder(invoice);
+    const canDeleteTestData = invoiceCanBePermanentlyDeleted(invoice);
     const ledger = paymentsForInvoice(invoice.id)
       .filter((item) =>
         ["completed", "partially_refunded", "refunded", "cancelled"].includes(
@@ -6355,13 +6591,14 @@ if (automaticClosure) {
                     Number(payment.refunded_cents || 0);
                   const cancellation =
                     payment.metadata?.cancelled_by_admin || null;
-                  return `<div class="activity-item"><span class="activity-icon">${icon("wallet", 16)}</span><span class="activity-copy"><strong>${escapeHTML(formatMoney(net, payment.currency))} · ${escapeHTML(paymentMethodLabel(payment.method))}${payment.status === "cancelled" ? " · annullato" : ""}</strong><span>${escapeHTML(formatDate(payment.paid_at || payment.created_at))}${payment.reference ? ` · ${escapeHTML(payment.reference)}` : ""}${cancellation?.reason ? ` · ${escapeHTML(cancellation.reason)}` : ""}</span></span>${payment.provider === "manual" && payment.status === "completed" ? `<button class="row-action" type="button" data-action="open-cancel-payment" data-payment-id="${escapeHTML(payment.id)}" aria-label="Annulla incasso">${icon("trash", 16)}</button>` : ""}</div>`;
+                  const editable = manualPaymentCanBeEdited(payment);
+                  return `<div class="activity-item"><span class="activity-icon">${icon("wallet", 16)}</span><span class="activity-copy"><strong>${escapeHTML(formatMoney(net, payment.currency))} · ${escapeHTML(paymentMethodLabel(payment.method))}${payment.status === "cancelled" ? " · annullato" : ""}</strong><span>${escapeHTML(formatDate(payment.paid_at || payment.created_at))}${payment.reference ? ` · ${escapeHTML(payment.reference)}` : ""}${cancellation?.reason ? ` · ${escapeHTML(cancellation.reason)}` : ""}</span></span>${payment.provider === "manual" && payment.status === "completed" ? `<span class="row-actions">${editable ? `<button class="row-action" type="button" data-action="open-edit-payment" data-payment-id="${escapeHTML(payment.id)}" aria-label="Modifica incasso" title="Modifica incasso">${icon("edit", 16)}</button>` : ""}<button class="row-action" type="button" data-action="open-cancel-payment" data-payment-id="${escapeHTML(payment.id)}" aria-label="Annulla incasso" title="Annulla incasso">${icon("trash", 16)}</button></span>` : ""}</div>`;
                 })
                 .join("")}</div></div>`
             : ""
         }
       `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${canSendReminder ? `<button class="btn btn--secondary" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}">${icon("bell", 15)} Invia notifica</button>` : ""}${invoiceCanBeVoided(invoice) ? `<button class="btn btn--danger" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina scadenza</button>` : ""}${!["paid", "processing", "void"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>${status !== "void" ? `<button class="btn btn--secondary" type="button" data-action="open-edit-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("edit", 15)} Modifica</button>` : ""}${canSendReminder ? `<button class="btn btn--secondary" type="button" data-action="open-payment-reminder" data-invoice-id="${escapeHTML(invoice.id)}">${icon("bell", 15)} Invia notifica</button>` : ""}${canDeleteTestData ? `<button class="btn btn--danger" type="button" data-action="open-delete-test-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina dati di prova</button>` : invoiceCanBeVoided(invoice) ? `<button class="btn btn--danger" type="button" data-action="open-void-invoice" data-invoice-id="${escapeHTML(invoice.id)}">${icon("trash", 15)} Elimina scadenza</button>` : ""}${!["paid", "processing", "void"].includes(status) ? `<button class="btn btn--primary" type="button" data-action="mark-invoice-paid" data-invoice-id="${escapeHTML(invoice.id)}">${icon("checkSimple", 15)} Segna pagato</button>` : ""}`,
     });
   }
 
@@ -6412,6 +6649,34 @@ if (automaticClosure) {
     });
   }
 
+  function openDeleteTestInvoiceModal(invoiceId) {
+    const invoice = state.data.invoices.find((item) => item.id === invoiceId);
+    if (!invoiceCanBePermanentlyDeleted(invoice)) {
+      toast(
+        "Eliminazione non consentita",
+        "Questa scadenza contiene una transazione proveniente da un provider esterno e non può essere cancellata definitivamente.",
+        "error",
+      );
+      return;
+    }
+    const student = studentForInvoice(invoice);
+    openModal({
+      title: "Elimina definitivamente i dati di prova",
+      subtitle: `${invoice.number} · ${fullName(student)}`,
+      className: "modal--sm",
+      body: `
+        <form id="delete-test-invoice-form">
+          <input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />
+          <input type="hidden" name="expected_number" value="${escapeHTML(invoice.number)}" />
+          <div class="info-callout">${icon("alert", 17)}<p><strong>Questa operazione è definitiva.</strong> Verranno eliminati la scadenza, i movimenti manuali collegati, eventuali avvisi di bonifico e promemoria. La traccia tecnica dell’operazione resta nell’audit amministrativo.</p></div>
+          <div class="field" style="margin-top:16px"><label for="delete-test-reason">Motivo</label><textarea class="textarea" id="delete-test-reason" name="reason" rows="3" maxlength="500" placeholder="Es. Pagamento creato durante una prova" required></textarea></div>
+          <div class="field" style="margin-top:14px"><label for="delete-test-confirmation">Per confermare, scrivi il numero fattura <strong>${escapeHTML(invoice.number)}</strong></label><input class="input" id="delete-test-confirmation" name="confirmation" autocomplete="off" required /></div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Torna indietro</button><button class="btn btn--danger" type="submit" form="delete-test-invoice-form">${icon("trash", 15)} Elimina definitivamente</button>`,
+    });
+  }
+
   function openCancelManualPaymentModal(paymentId) {
     const payment = state.data.payments.find((item) => item.id === paymentId);
     if (!payment || payment.provider !== "manual" || payment.status !== "completed") {
@@ -6432,6 +6697,79 @@ if (automaticClosure) {
         </form>
       `,
       footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Torna indietro</button><button class="btn btn--danger" type="submit" form="cancel-payment-form">${icon("trash", 15)} Annulla incasso</button>`,
+    });
+  }
+
+  function manualPaymentCanBeEdited(payment) {
+    return Boolean(
+      payment &&
+        payment.provider === "manual" &&
+        payment.status === "completed" &&
+        !payment.idempotency_key,
+    );
+  }
+
+  function openEditManualPaymentModal(paymentId) {
+    const payment = state.data.payments.find((item) => item.id === paymentId);
+    if (!manualPaymentCanBeEdited(payment)) {
+      toast(
+        "Incasso non modificabile",
+        "Le transazioni PayPal e i bonifici confermati dal relativo avviso non si modificano manualmente.",
+        "error",
+      );
+      return;
+    }
+    const invoice = state.data.invoices.find(
+      (item) => item.id === payment.invoice_id,
+    );
+    if (!invoice) return;
+    const otherPaidCents = paymentsForInvoice(invoice.id)
+      .filter(
+        (item) =>
+          item.id !== payment.id &&
+          ["completed", "partially_refunded", "refunded"].includes(
+            item.status,
+          ),
+      )
+      .reduce(
+        (sum, item) =>
+          sum +
+          Math.max(
+            0,
+            Number(item.amount_cents || 0) -
+              Number(item.refunded_cents || 0),
+          ),
+        0,
+      );
+    const maxAmountCents = Math.max(
+      1,
+      Number(invoice.total_cents || 0) - otherPaidCents,
+    );
+    const paidOn = dateKey(payment.paid_at || payment.created_at);
+    const methods = [
+      ["bank_transfer", "Bonifico"],
+      ["paypal", "PayPal"],
+      ["cash", "Contanti"],
+      ["other", "Altro"],
+    ];
+
+    openModal({
+      title: "Modifica incasso",
+      subtitle: `${invoice.number} · ${invoice.title}`,
+      className: "modal--sm",
+      body: `
+        <form id="edit-payment-form">
+          <input type="hidden" name="payment_id" value="${escapeHTML(payment.id)}" />
+          <div class="form-grid">
+            <div class="field"><label for="edit-payment-amount">Importo (€)</label><input class="input" id="edit-payment-amount" name="amount_eur" type="number" min="0.01" max="${escapeHTML((maxAmountCents / 100).toFixed(2))}" step="0.01" inputmode="decimal" value="${escapeHTML((Number(payment.amount_cents || 0) / 100).toFixed(2))}" required /><p class="field-hint">Massimo disponibile: ${escapeHTML(formatMoney(maxAmountCents, invoice.currency))}.</p></div>
+            <div class="field"><label for="edit-payment-method">Metodo ricevuto</label><select class="select" id="edit-payment-method" name="method">${methods.map(([value, label]) => `<option value="${value}"${payment.method === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+            <div class="field"><label for="edit-payment-date">Data del pagamento</label><input class="input" id="edit-payment-date" name="paid_on" type="date" value="${escapeHTML(paidOn)}" max="${escapeHTML(todayKey())}" required /></div>
+            <div class="field"><label for="edit-payment-reference">Riferimento o nota</label><input class="input" id="edit-payment-reference" name="reference" maxlength="250" value="${escapeHTML(payment.reference || "")}" placeholder="Es. CRO o annotazione interna" /></div>
+          </div>
+          <div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Il saldo della scadenza verrà ricalcolato automaticamente. I valori precedenti resteranno conservati nello storico tecnico.</p></div>
+        </form>
+      `,
+      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="edit-payment-form">${icon("edit", 15)} Salva modifiche</button>`,
     });
   }
 
@@ -6559,7 +6897,7 @@ if (automaticClosure) {
           </section>
           <section>
             <h3 style="font-size:15px;margin-bottom:5px">Oppure fai un bonifico</h3>
-            <p class="muted" style="font-size:11px;margin-bottom:15px">La causale deve riportare, in quest’ordine: <strong>nome, cognome, numero fattura</strong>. Puoi copiare quella già compilata qui sotto.</p>
+            <p class="muted" style="font-size:11px;margin-bottom:15px">La causale riporta automaticamente <strong>nome e cognome dell’allievo, “saldo fattura” e numero fattura</strong>. Puoi copiarla già compilata qui sotto.</p>
             ${bankDetails(invoice)}
           </section>
         </div>
@@ -7639,12 +7977,18 @@ if (automaticClosure) {
       openInvoiceModal();
     } else if (action === "view-invoice") {
       openInvoiceDetails(actionTarget.dataset.invoiceId);
+    } else if (action === "open-edit-invoice") {
+      openInvoiceModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-void-invoice") {
       openVoidInvoiceModal(actionTarget.dataset.invoiceId);
+    } else if (action === "open-delete-test-invoice") {
+      openDeleteTestInvoiceModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-payment-reminder") {
       openPaymentReminderModal(actionTarget.dataset.invoiceId);
     } else if (action === "mark-invoice-paid") {
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
+    } else if (action === "open-edit-payment") {
+      openEditManualPaymentModal(actionTarget.dataset.paymentId);
     } else if (action === "pay-invoice") {
       openPaymentModal(actionTarget.dataset.invoiceId);
     } else if (action === "close-modal") {
@@ -7844,8 +8188,14 @@ if (automaticClosure) {
       openEditLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "mark-invoice-paid") {
       openMarkInvoicePaid(actionTarget.dataset.invoiceId);
+    } else if (action === "open-edit-payment") {
+      openEditManualPaymentModal(actionTarget.dataset.paymentId);
+    } else if (action === "open-edit-invoice") {
+      openInvoiceModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-void-invoice") {
       openVoidInvoiceModal(actionTarget.dataset.invoiceId);
+    } else if (action === "open-delete-test-invoice") {
+      openDeleteTestInvoiceModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-payment-reminder") {
       openPaymentReminderModal(actionTarget.dataset.invoiceId);
     } else if (action === "open-cancel-payment") {
@@ -8270,20 +8620,48 @@ if (automaticClosure) {
           "Il cambiamento e il motivo sono visibili alle famiglie interessate.",
         );
       } else if (formId === "invoice-form") {
-        const student = state.data.students.find(
-          (item) => item.id === values.student_id,
-        );
-        if (!student) throw new Error("Seleziona un allievo.");
-        await state.store.saveInvoice({
-          ...values,
-          family_id: student.family_id,
-        });
-        closeModal();
-        await refreshData();
-        toast(
-          "Scadenza creata",
-          "La famiglia può ora visualizzarla nella propria area.",
-        );
+        const amountCents = Math.round(Number(values.amount_eur) * 100);
+        const title = String(values.title || "").trim();
+        const number = String(values.number || "").trim();
+        if (!title) throw new Error("Inserisci la voce della scadenza.");
+        if (!Number.isFinite(amountCents) || amountCents <= 0) {
+          throw new Error("Inserisci un importo valido maggiore di zero.");
+        }
+        if (!values.due_date) throw new Error("Indica la data di scadenza.");
+        if (values.invoice_id) {
+          if (!number) throw new Error("Inserisci il numero fattura.");
+          await state.store.updateInvoice({
+            invoiceId: values.invoice_id,
+            number,
+            title,
+            description: String(values.description || "").trim(),
+            totalCents: amountCents,
+            dueDate: values.due_date,
+          });
+          closeModal();
+          await refreshData();
+          toast(
+            "Scadenza modificata",
+            "Importo, data, descrizione e numero fattura sono stati aggiornati.",
+          );
+        } else {
+          const student = state.data.students.find(
+            (item) => item.id === values.student_id,
+          );
+          if (!student) throw new Error("Seleziona un allievo.");
+          await state.store.saveInvoice({
+            ...values,
+            title,
+            number,
+            family_id: student.family_id,
+          });
+          closeModal();
+          await refreshData();
+          toast(
+            "Scadenza creata",
+            "La famiglia può ora visualizzarla nella propria area.",
+          );
+        }
       } else if (formId === "void-invoice-form") {
         const reason = String(values.reason || "").trim();
         if (!reason) throw new Error("Indica il motivo dell’annullamento.");
@@ -8293,6 +8671,47 @@ if (automaticClosure) {
         toast(
           "Scadenza eliminata",
           "È stata annullata e nascosta alle famiglie; lo storico resta conservato.",
+        );
+      } else if (formId === "delete-test-invoice-form") {
+        const reason = String(values.reason || "").trim();
+        const confirmation = String(values.confirmation || "").trim();
+        const expectedNumber = String(values.expected_number || "").trim();
+        if (!reason) throw new Error("Indica perché si tratta di dati di prova.");
+        if (confirmation !== expectedNumber) {
+          throw new Error("Il numero fattura digitato non corrisponde.");
+        }
+        await state.store.deleteTestInvoice(values.invoice_id, reason);
+        closeModal();
+        await refreshData();
+        toast(
+          "Dati di prova eliminati",
+          "La scadenza e tutti i movimenti manuali collegati sono stati rimossi definitivamente.",
+        );
+      } else if (formId === "edit-payment-form") {
+        const amountEur = Number(values.amount_eur);
+        const amountCents = Math.round(amountEur * 100);
+        const paidOn = String(values.paid_on || "").trim();
+        if (!Number.isFinite(amountEur) || amountCents <= 0) {
+          throw new Error("Inserisci un importo valido maggiore di zero.");
+        }
+        if (!paidOn) {
+          throw new Error("Indica la data in cui è avvenuto il pagamento.");
+        }
+        if (paidOn > todayKey()) {
+          throw new Error("La data del pagamento non può essere futura.");
+        }
+        await state.store.updateManualPayment({
+          paymentId: values.payment_id,
+          amountCents,
+          method: values.method,
+          paidOn,
+          reference: String(values.reference || "").trim(),
+        });
+        closeModal();
+        await refreshData();
+        toast(
+          "Incasso modificato",
+          `Salvato ${formatMoney(amountCents)} del ${formatDate(paidOn)} via ${paymentMethodLabel(values.method)}.`,
         );
       } else if (formId === "cancel-payment-form") {
         const reason = String(values.reason || "").trim();
