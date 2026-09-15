@@ -15,7 +15,7 @@ import type {
   User,
 } from "npm:@supabase/supabase-js@2.49.8";
 
-type InviteAction = "status" | "generate_link";
+type InviteAction = "status" | "generate_link" | "send_email";
 type AccountStatus =
   | "missing"
   | "pending"
@@ -163,6 +163,20 @@ function publicAuthFailure(
   }
 
   if (
+    operation === "send_email" &&
+    (/email address not authorized|smtp|email.*(?:disabled|not configured)/i
+      .test(message) || code === "email_address_not_authorized")
+  ) {
+    return {
+      code: "email_delivery_not_configured",
+      message:
+        "L’invio automatico non è ancora configurato. Collega Gmail SMTP nelle impostazioni di Supabase.",
+      status: 503,
+      retryable: false,
+    };
+  }
+
+  if (
     status === 429 ||
     ["over_request_rate_limit", "rate_limit_exceeded"].includes(code) ||
     /rate limit/i.test(message)
@@ -170,6 +184,8 @@ function publicAuthFailure(
     return {
       code: operation === "status"
         ? "account_status_rate_limited"
+        : operation === "send_email"
+        ? "email_send_rate_limited"
         : "link_generation_rate_limited",
       message:
         "Supabase ha limitato temporaneamente le richieste. Attendi qualche minuto e riprova.",
@@ -192,6 +208,13 @@ function publicAuthFailure(
     ? {
       code: "account_status_failed",
       message: "Non è stato possibile verificare lo stato dell'account.",
+      status: 502,
+      retryable: true,
+    }
+    : operation === "send_email"
+    ? {
+      code: "email_send_failed",
+      message: "Non è stato possibile inviare la mail di benvenuto.",
       status: 502,
       retryable: true,
     }
@@ -815,6 +838,77 @@ async function activeGenerateResponse(
   });
 }
 
+async function automaticEmailResponse(
+  request: Request,
+  admin: SupabaseClient,
+  family: FamilyRecord,
+  email: string,
+  resolution: AccountResolution,
+  initialStatus: PublicAccountStatus,
+  redirectTo: string | undefined,
+): Promise<Response> {
+  let authUser = resolution.user;
+  if (initialStatus.account_status === "missing") {
+    const { data, error } = await admin.auth.admin.inviteUserByEmail(email, {
+      ...(redirectTo ? { redirectTo } : {}),
+      data: {
+        display_name: family.guardian_name || family.display_name,
+        invited_for_family_id: family.id,
+      },
+    });
+    if (error) throw new AuthOperationError(error, "send_email");
+    authUser = data.user;
+  } else {
+    const { error } = await admin.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false,
+        ...(redirectTo ? { emailRedirectTo: redirectTo } : {}),
+      },
+    });
+    if (error) throw new AuthOperationError(error, "send_email");
+  }
+
+  if (!authUser) {
+    const [freshResolution] = await resolveAccounts(
+      admin,
+      [email],
+      "send_email",
+    );
+    authUser = freshResolution.user;
+  }
+  if (!authUser || normalizeEmail(authUser.email) !== email) {
+    throw new PublicOperationError(
+      "invalid_email_response",
+      "Supabase non ha confermato l’invio della mail di benvenuto.",
+      502,
+      true,
+    );
+  }
+
+  const profileState = await ensureProfile(
+    admin,
+    authUser,
+    email,
+    family.guardian_name || family.display_name,
+  );
+  const linkState = await ensureFamilyLink(admin, family.id, authUser.id);
+  const accountActive = initialStatus.account_status === "active";
+
+  return jsonResponse(request, {
+    ok: true,
+    action: "send_email",
+    family_id: family.id,
+    target_email: email,
+    account_status: accountActive ? "active" : "pending",
+    account_active: accountActive,
+    email_sent: true,
+    linked_existing_user: Boolean(resolution.user || resolution.profile),
+    profile_repaired: profileState.profileCreated,
+    family_link_created: linkState.linkCreated,
+  });
+}
+
 Deno.serve(async (request) => {
   const preflight = handlePreflight(request);
   if (preflight) return preflight;
@@ -857,7 +951,11 @@ Deno.serve(async (request) => {
 
     const body = rawBody as Record<string, unknown> & InviteRequest;
     const action = body.action;
-    if (action !== "status" && action !== "generate_link") {
+    if (
+      action !== "status" &&
+      action !== "generate_link" &&
+      action !== "send_email"
+    ) {
       throw new PublicOperationError(
         "invalid_action",
         "Azione non supportata.",
@@ -911,6 +1009,17 @@ Deno.serve(async (request) => {
       );
     }
     const redirectTo = allowedRedirect(body.redirect_to);
+    if (action === "send_email") {
+      return await automaticEmailResponse(
+        request,
+        admin,
+        family,
+        email,
+        resolution,
+        initialStatus,
+        redirectTo,
+      );
+    }
     if (initialStatus.account_status === "active" && resolution.user) {
       return await activeGenerateResponse(
         request,

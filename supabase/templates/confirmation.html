@@ -17,18 +17,20 @@
             </tr>
             <tr>
               <td style="padding:6px 36px 38px">
-                <p style="margin:0 0 10px;color:#0f8f9f;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase">Area riservata</p>
-                <h1 style="margin:0 0 18px;color:#08457c;font-family:Georgia,'Times New Roman',serif;font-size:32px;line-height:1.2">Il tuo link di accesso</h1>
-                <p style="margin:0 0 14px;font-size:16px;line-height:1.65">Valeria ti ha inviato un nuovo collegamento per entrare nell’area riservata di Quarto MoVimento.</p>
-                <p style="margin:0 0 24px;font-size:16px;line-height:1.65">Qui puoi consultare lezioni, presenze, recuperi e pagamenti della tua famiglia.</p>
+                <p style="margin:0 0 10px;color:#0f8f9f;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase">Area riservata famiglie</p>
+                <h1 style="margin:0 0 18px;color:#08457c;font-family:Georgia,'Times New Roman',serif;font-size:32px;line-height:1.2">Benvenut@ in Quarto MoVimento</h1>
+                <p style="margin:0 0 14px;font-size:16px;line-height:1.65">Ciao{{ if .Data.display_name }} {{ .Data.display_name }}{{ end }},</p>
+                <p style="margin:0 0 14px;font-size:16px;line-height:1.65">Valeria ti ha invitato nell’area famiglia, dove potrai consultare lezioni, presenze, recuperi e pagamenti.</p>
+                <p style="margin:0 0 24px;font-size:16px;line-height:1.65">Conferma il tuo indirizzo e scegli la password per completare l’accesso.</p>
                 <table role="presentation" cellspacing="0" cellpadding="0">
                   <tr>
                     <td style="border-radius:12px;background:#08457c">
-                      <a href="{{ .RedirectTo }}#token_hash={{ .TokenHash }}&amp;type=magiclink" style="display:inline-block;padding:14px 22px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none">Accedi ora</a>
+                      <a href="{{ .RedirectTo }}#token_hash={{ .TokenHash }}&amp;type=signup" style="display:inline-block;padding:14px 22px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none">Attiva il mio accesso</a>
                     </td>
                   </tr>
                 </table>
-                <p style="margin:24px 0 0;color:#627587;font-size:13px;line-height:1.55">Il collegamento è personale, vale 24 ore e si usa una sola volta. Se non ti aspettavi questo messaggio, puoi ignorarlo.</p>
+                <p style="margin:24px 0 0;color:#627587;font-size:13px;line-height:1.55">Dopo l’attivazione potrai tornare nell’area riservata da gestionale.quartomovimento.it usando la tua e-mail e la password scelta.</p>
+                <p style="margin:12px 0 0;color:#627587;font-size:13px;line-height:1.55">Il collegamento è personale, vale 24 ore e si usa una sola volta. Se non ti aspettavi questo invito, puoi ignorare il messaggio.</p>
               </td>
             </tr>
             <tr>

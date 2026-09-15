@@ -2424,7 +2424,7 @@ function schoolClosuresForStudent(studentId) {
       };
     }
 
-    async generateFamilyInviteLink(payload) {
+    async sendFamilyWelcomeEmail(payload) {
       const email = normalizeEmailList([payload?.email])[0];
       if (!email || email.endsWith("@invalid.local")) {
         const error = new Error("La famiglia non ha un indirizzo e-mail valido.");
@@ -2462,9 +2462,7 @@ function schoolClosuresForStudent(studentId) {
           target_email: email,
           account_status: "active",
           account_active: true,
-          link_generated: true,
-          activation_link: `https://demo.quartomovimento.it/?token_hash=${Date.now()}&type=magiclink`,
-          activation_link_type: "magiclink",
+          email_sent: true,
         };
       }
       if (!existing) {
@@ -2490,9 +2488,7 @@ function schoolClosuresForStudent(studentId) {
         target_email: email,
         account_status: "pending",
         account_active: false,
-        link_generated: true,
-        activation_link: `https://demo.quartomovimento.it/invito/${encodeURIComponent(email)}?token=${Date.now()}`,
-        activation_link_type: "invite",
+        email_sent: true,
       };
     }
   }
@@ -3051,21 +3047,20 @@ function schoolClosuresForStudent(studentId) {
       };
     }
 
-    async generateFamilyInviteLink(payload) {
+    async sendFamilyWelcomeEmail(payload) {
       const requestedEmail = normalizeEmailList([payload.email])[0] || "";
       const data = await this.invokeFamilyAccess({
-        action: "generate_link",
+        action: "send_email",
         family_id: payload.familyId,
         target_email: requestedEmail,
       });
       if (
         normalizeEmailList([data.target_email])[0] !== requestedEmail ||
         !["active", "pending"].includes(data.account_status) ||
-        !data.link_generated ||
-        !data.activation_link
+        data.email_sent !== true
       ) {
         const error = new Error(
-          "Non è stato possibile preparare la mail di benvenuto.",
+          "Non è stato possibile inviare la mail di benvenuto.",
         );
         error.code = "invalid_edge_response";
         throw error;
@@ -5668,7 +5663,7 @@ function schoolClosuresForStudent(studentId) {
                       const presentation = familyAccountStatusPresentation(
                         familyAccountStatus(family.id, email),
                       );
-                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--primary btn--sm" type="button" data-action="prepare-family-welcome-email" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" data-family-display-name="${escapeHTML(family.display_name || family.guardian_name || "")}">${icon("mail", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
+                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--primary btn--sm" type="button" data-action="send-family-welcome-email" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" data-family-display-name="${escapeHTML(family.display_name || family.guardian_name || "")}">${icon("mail", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
                     },
                   )
                   .join("")
@@ -7271,140 +7266,33 @@ if (automaticClosure) {
     return copied;
   }
 
-  async function copyWelcomeEmailLink(actionTarget) {
-    const copied = await copyTextToClipboard(actionTarget.dataset.value || "");
-    if (!copied) {
-      toast(
-        "Copia non riuscita",
-        "Seleziona il link nel campo e copialo manualmente.",
-        "error",
-      );
-      return;
-    }
-    actionTarget.innerHTML = `${icon("checkSimple", 15)} Collegamento copiato`;
-    actionTarget.setAttribute("aria-label", "Collegamento copiato");
-    toast(
-      "Collegamento copiato",
-      "Ora puoi inserirlo nella mail di benvenuto.",
-    );
-  }
-
-  function isValidActivationLink(value) {
-    try {
-      const parsed = new URL(value);
-      return ["https:", "http:"].includes(parsed.protocol);
-    } catch {
-      return false;
-    }
-  }
-
-  function familyWelcomeEmailSubject() {
-    return "Benvenuto in Quarto MoVimento - Area riservata";
-  }
-
-  function familyWelcomeEmailBody(link, details = {}) {
-    const rawName = details.guardianName || details.familyDisplayName || "famiglia";
-    const familyName = rawName.trim() || "famiglia";
-    return [
-      `Benvenut@ ${familyName},`,
-      "",
-      "questa è la mail che contiene il link di accesso all’area riservata dei corsi di Quarto MoVimento.",
-      "",
-      "Da qui potrai verificare tutti i dati relativi a pagamenti, presenze e assenze.",
-      "",
-      "Accedi qui:",
-      link,
-      "",
-      "Per tenere l’area riservata sempre a portata di mano:",
-      "- Android: apri il link nel browser, poi seleziona Menu > Aggiungi alla schermata Home > Aggiungi.",
-      "- iPhone: apri il link in Safari, poi Condividi > Aggiungi alla schermata Home > Aggiungi.",
-      "- PC: apri il sito nel browser, poi salva la pagina ai Preferiti o aggiungila alla barra dei collegamenti.",
-      "",
-      "Il link è personale e destinato alla tua famiglia.",
-      "",
-      "Se non hai richiesto questo accesso, puoi ignorare questa email.",
-      "",
-      "Valeria",
-      "Quarto MoVimento",
-    ].join("\n");
-  }
-
-  function buildFamilyWelcomeMailto(email, link, details = {}) {
-    const subject = encodeURIComponent(familyWelcomeEmailSubject());
-    const body = encodeURIComponent(
-      familyWelcomeEmailBody(link, details),
-    );
-    return `mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`;
-  }
-
-  async function sendWelcomeEmail(actionTarget) {
-    const email = normalizeEmailList([actionTarget.dataset.email])[0] || "";
-    const link = actionTarget.dataset.value || "";
-    if (!email || !link) {
-      toast(
-        "Mail non pronta",
-        "Prepara prima la mail di benvenuto per questa famiglia.",
-        "error",
-      );
-      return;
-    }
-    const mailto = buildFamilyWelcomeMailto(email, link, {
-      guardianName: actionTarget.dataset.guardianName || "",
-      familyDisplayName: actionTarget.dataset.familyDisplayName || "",
-    });
-    window.location.href = mailto;
-    toast(
-      "Mail pronta da inviare",
-      "Il messaggio è aperto nella tua posta: controllalo e premi Invia.",
-      "success",
-    );
-  }
-
-  function openWelcomeEmailModal(link, email, context) {
-    const details = context || {};
-    const accountActive = details.accountActive === true;
-    openModal({
-      title: "Mail di benvenuto pronta",
-      subtitle: "Il messaggio non è stato ancora inviato: puoi aprirlo nella tua posta oppure copiare il collegamento.",
-      className: "modal--sm",
-      body: `
-        <div class="info-callout">${icon("info", 18)}<p>${accountActive ? "L’account è già attivo: questo nuovo link permette al parente di accedere senza modificare la password." : "Questo link permette al parente di attivare il proprio accesso e scegliere una password."} Il link è personale per <strong>${escapeHTML(email)}</strong>, vale 24 ore e si usa una volta sola. Se ne generi un altro, quello precedente smette di funzionare.</p></div>
-        <div class="field" style="margin-top:16px"><label for="welcome-email-link">Collegamento inserito nella mail</label><input class="input" id="welcome-email-link" value="${escapeHTML(link)}" readonly spellcheck="false" /></div>
-      `,
-      footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--secondary" type="button" data-action="copy-welcome-email-link" data-value="${escapeHTML(link)}">${icon("copy", 15)} Copia collegamento</button><button class="btn btn--primary" type="button" data-action="send-welcome-email" data-email="${escapeHTML(email)}" data-value="${escapeHTML(link)}" data-guardian-name="${escapeHTML(details.guardianName || "")}" data-family-display-name="${escapeHTML(details.familyDisplayName || "")}">${icon("mail", 15)} Invia la mail di benvenuto</button>`,
-    });
-  }
-
-  async function handlePrepareFamilyWelcomeEmailAction(actionTarget) {
+  async function handleSendFamilyWelcomeEmailAction(actionTarget) {
     const familyId = actionTarget.dataset.familyId;
-    const studentId = actionTarget.dataset.studentId;
     const email = normalizeEmailList([actionTarget.dataset.email])[0] || "";
     if (!email || email.endsWith("@invalid.local")) {
       toast(
         "E-mail famiglia mancante",
-        "Inserisci un indirizzo valido nell’anagrafica prima di preparare la mail.",
+        "Inserisci un indirizzo valido nell’anagrafica prima di inviare la mail.",
         "error",
       );
       return;
     }
-    setButtonLoading(actionTarget, true, "Preparazione…");
+    setButtonLoading(actionTarget, true, "Invio…");
     try {
-      const result = await state.store.generateFamilyInviteLink({
+      const result = await state.store.sendFamilyWelcomeEmail({
         familyId,
         email,
         guardianName: actionTarget.dataset.guardianName,
       });
       const accountActive =
         result.account_status === "active" || result.account_active === true;
-      const activationLink = result.activation_link || "";
-      if (!result.link_generated || !isValidActivationLink(activationLink)) {
+      if (result.email_sent !== true) {
         const error = new Error(
-          "Non è stato possibile preparare la mail di benvenuto.",
+          "Non è stato possibile inviare la mail di benvenuto.",
         );
         error.code = "invalid_edge_response";
         throw error;
       }
-      const family = state.data.families.find((item) => item.id === familyId);
       rememberFamilyAccountStatuses(familyId, [
         {
           email,
@@ -7412,19 +7300,19 @@ if (automaticClosure) {
           account_active: accountActive,
         },
       ]);
-      openWelcomeEmailModal(activationLink, email, {
-        familyId,
-        studentId,
-        guardianName: actionTarget.dataset.guardianName,
-        familyDisplayName: family?.display_name || family?.guardian_name || "",
-        accountActive,
-      });
+      actionTarget.innerHTML = `${icon("checkSimple", 15)} Mail inviata`;
+      actionTarget.disabled = true;
+      toast(
+        "Mail di benvenuto inviata",
+        `Il messaggio è stato spedito direttamente a ${email}.`,
+        "success",
+      );
     } catch (error) {
       setButtonLoading(actionTarget, false);
       toast(
         error?.code === "family_email_missing"
           ? "E-mail famiglia mancante"
-          : "Mail non preparata",
+          : "Mail non inviata",
         error.message || "Controlla la configurazione Supabase e riprova.",
         "error",
       );
@@ -7557,8 +7445,8 @@ if (automaticClosure) {
       await openStudentDetails(actionTarget.dataset.studentId, actionTarget);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "prepare-family-welcome-email") {
-      await handlePrepareFamilyWelcomeEmailAction(actionTarget);
+    } else if (action === "send-family-welcome-email") {
+      await handleSendFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "open-lesson-modal") {
       openLessonModal(actionTarget.dataset.date, {
         courseId: actionTarget.dataset.courseId,
@@ -7694,10 +7582,6 @@ if (automaticClosure) {
       downloadStudentCalendar(actionTarget.dataset.studentId);
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
-    } else if (action === "copy-welcome-email-link") {
-      await copyWelcomeEmailLink(actionTarget);
-    } else if (action === "send-welcome-email") {
-      await sendWelcomeEmail(actionTarget);
     } else if (action === "create-makeup-lesson") {
       const courseId = actionTarget.dataset.courseId;
       closeModal();
@@ -7776,8 +7660,8 @@ if (automaticClosure) {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "delete-student") {
       await handleDeleteStudentAction(actionTarget);
-    } else if (action === "prepare-family-welcome-email") {
-      await handlePrepareFamilyWelcomeEmailAction(actionTarget);
+    } else if (action === "send-family-welcome-email") {
+      await handleSendFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "open-individual-schedule") {
       openIndividualScheduleModal(actionTarget.dataset.studentId);
     } else if (action === "open-student-lesson") {
@@ -7835,10 +7719,6 @@ if (automaticClosure) {
       }
     } else if (action === "copy-value") {
       await copyValue(actionTarget.dataset.value || "");
-    } else if (action === "copy-welcome-email-link") {
-      await copyWelcomeEmailLink(actionTarget);
-    } else if (action === "send-welcome-email") {
-      await sendWelcomeEmail(actionTarget);
     } else if (action === "simulate-paypal") {
       setButtonLoading(actionTarget, true, "Pagamento…");
       try {

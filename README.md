@@ -245,11 +245,10 @@ Nel Dashboard Supabase:
    - redirect locali aggiuntivi: `http://localhost:5173/**` e
      `http://127.0.0.1:5173/**`;
 3. configurare un server SMTP personalizzato in **Authentication → SMTP
-   Settings** soltanto se si vogliono usare le funzioni che spediscono davvero
-   e-mail, come recupero password e magic link. La creazione degli accessi
-   famiglia non usa SMTP e non invia messaggi automaticamente: prepara una
-   bozza nel client di posta dell'amministratrice, che controlla e invia la
-   mail di benvenuto manualmente;
+   Settings**. Inviti famiglia, recupero password e magic link vengono spediti
+   automaticamente da Supabase; senza SMTP personalizzato il provider
+   predefinito non è adatto alla produzione e non consegna a destinatari esterni
+   al team del progetto;
 4. creare o invitare dal Dashboard l'account Auth della prima amministratrice
    con indirizzo `quartomov@gmail.com`, senza salvare password nel repository,
    quindi assegnargli ruolo e nome visualizzato come indicato nella sezione
@@ -385,7 +384,7 @@ Se il secret remoto contiene ancora il vecchio valore GitHub Pages, aggiornarlo
 con `supabase secrets set` e ripubblicare le Edge Functions: un valore esplicito
 ha precedenza sulla allowlist predefinita nel codice.
 
-### Link famiglia manuali
+### Mail di benvenuto famiglia
 
 Il salvataggio di un allievo usa
 `admin_upsert_student_family_with_access`: salva allievo, iscrizione e contatti,
@@ -395,17 +394,15 @@ solo per un'amministratrice autenticata.
 
 Aprendo la scheda dell'allievo, il frontend chiede a `invite-family` lo stato
 Auth e mostra sempre **Invia la mail di benvenuto** per gli account utilizzabili.
-Il pulsante prepara una bozza nel client di posta, ma l'invio resta manuale. Per
-un account non ancora confermato include un link di attivazione; per un account
-confermato include un magic link monouso, così il parente entra senza modificare
-la password. La
-funzione usa `auth.admin.generateLink({ type: "invite" | "magiclink" })`: il
-link torna nella
-sola risposta HTTPS con `Cache-Control: no-store`, non viene salvato né inserito
-nei log e nessuna chiave amministrativa raggiunge il frontend.
+Il pulsante chiama l'azione `send_email` della Edge Function e la mail viene
+spedita direttamente tramite l'SMTP configurato in Supabase, senza aprire bozze
+nel client di posta dell'amministratrice. Per un account mancante usa
+`auth.admin.inviteUserByEmail()`; per un account già esistente usa
+`auth.signInWithOtp()`. La funzione collega sempre il profilo alla famiglia e
+non espone chiavi amministrative al frontend.
 
-Il link condiviso **non** è l'`action_link` di Supabase. La funzione prende
-`properties.hashed_token` e costruisce un indirizzo dell'applicazione:
+I template Auth non usano direttamente `{{ .ConfirmationURL }}`: costruiscono
+un indirizzo dell'applicazione a partire da `{{ .TokenHash }}`:
 
 ```
 https://gestionale.quartomovimento.it/?auth_action=set-password#token_hash=<hash>&type=invite
@@ -419,9 +416,8 @@ crawler scarica solo l'HTML statico — il frammento non arriva nemmeno al serve
 e il token viene speso da `auth.verifyOtp()` solo nel browser che esegue davvero
 il JavaScript dell'app.
 
-Restano due proprietà da tenere presenti: il link vale una sola volta (generarne
-uno nuovo invalida il precedente) e scade dopo `otp_expiry`, portato a 24 ore in
-`supabase/config.toml` perché un'ora non basta per un link condiviso a mano.
+Restano due proprietà da tenere presenti: il link vale una sola volta e scade
+dopo `otp_expiry`, portato a 24 ore in `supabase/config.toml`.
 
 ### Magic link e reset password
 

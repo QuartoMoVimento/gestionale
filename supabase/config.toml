@@ -57,6 +57,10 @@ otp_expiry = 86400
 subject = "Il tuo accesso a Quarto MoVimento"
 content_path = "./supabase/templates/invite.html"
 
+[auth.email.template.confirmation]
+subject = "Benvenut@ nell'area riservata di Quarto MoVimento"
+content_path = "./supabase/templates/confirmation.html"
+
 # Come per l'invito: il link di default di Supabase (ConfirmationURL) punta a
 # /auth/v1/verify e brucia il token al primo GET, anche se a farlo e' uno
 # scanner di sicurezza della posta invece della persona. Questi due template
