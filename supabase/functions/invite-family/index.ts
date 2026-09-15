@@ -859,6 +859,32 @@ async function automaticEmailResponse(
     if (error) throw new AuthOperationError(error, "send_email");
     authUser = data.user;
   } else {
+    // Gli account creati in precedenza da generateLink(type: "invite") sono
+    // presenti in Auth ma non ancora confermati. Con la registrazione pubblica
+    // disabilitata, signInWithOtp considera quell'utente una nuova iscrizione
+    // e risponde `signup_disabled`, impedendo il reinvio della mail.
+    // L'operazione resta amministrativa: confermiamo soltanto l'utente Auth già
+    // associato a un indirizzo autorizzato della famiglia, quindi spediamo il
+    // magic link senza consentire la creazione pubblica di nuovi account.
+    if (
+      authUser &&
+      initialStatus.account_status === "pending" &&
+      !authUserIsConfirmed(authUser)
+    ) {
+      const { data: confirmedData, error: confirmError } = await admin.auth
+        .admin.updateUserById(authUser.id, {
+          email_confirm: true,
+          user_metadata: {
+            ...(authUser.user_metadata || {}),
+            display_name: family.guardian_name || family.display_name,
+            invited_for_family_id: family.id,
+          },
+        });
+      if (confirmError) {
+        throw new AuthOperationError(confirmError, "send_email");
+      }
+      authUser = confirmedData.user;
+    }
     const { error } = await admin.auth.signInWithOtp({
       email,
       options: {
@@ -893,7 +919,7 @@ async function automaticEmailResponse(
     family.guardian_name || family.display_name,
   );
   const linkState = await ensureFamilyLink(admin, family.id, authUser.id);
-  const accountActive = initialStatus.account_status === "active";
+  const accountActive = Boolean(authUser && authUserIsConfirmed(authUser));
 
   return jsonResponse(request, {
     ok: true,
