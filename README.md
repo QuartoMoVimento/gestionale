@@ -417,7 +417,7 @@ e il token viene speso da `auth.verifyOtp()` solo nel browser che esegue davvero
 il JavaScript dell'app.
 
 Restano due proprietà da tenere presenti: il link vale una sola volta e scade
-dopo `otp_expiry`, portato a 24 ore in `supabase/config.toml`.
+dopo `otp_expiry`, portato a 7 giorni in `supabase/config.toml`.
 
 ### Magic link e reset password
 
@@ -432,10 +432,12 @@ un link basato su `{{ .TokenHash }}`, sullo stesso schema dell'invito.
 ### Pubblicare le modifiche
 
 `config.toml` descrive lo stato desiderato ma **non modifica da solo il
-progetto remoto**: `otp_expiry` e i tre template email vanno replicati a mano
+progetto remoto**: `otp_expiry` e i quattro template email vanno replicati a mano
 nel Dashboard.
 
-1. **Authentication → Emails → Email OTP Expiration** → `86400` (24 ore).
+1. **Authentication → Emails → Email OTP Expiration** → `604800` (7 giorni,
+   configurato tramite Management API perché supera il limite consigliato
+   nell'interfaccia).
 2. **Authentication → Emails → Templates**:
    - *Invite*: incollare `supabase/templates/invite.html` (oggetto "Il tuo
      accesso a Quarto MoVimento"); resta inutilizzato dal flusso applicativo ma

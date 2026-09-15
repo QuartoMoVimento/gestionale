@@ -9,7 +9,7 @@ max_rows = 1000
 
 [db]
 port = 54322
-major_version = 15
+major_version = 17
 
 [db.ssl_enforcement]
 enabled = true
@@ -49,9 +49,11 @@ enable_confirmations = true
 secure_password_change = true
 max_frequency = "1m"
 otp_length = 8
-# I link famiglia si condividono a mano (WhatsApp, di persona): un'ora non basta
-# e il genitore trovava il link gia scaduto. 86400 e anche il massimo ammesso.
-otp_expiry = 86400
+# Le famiglie possono non aprire subito la mail automatica: un'ora non basta e
+# il genitore trovava il link gia scaduto. Sette giorni sono 604800 secondi.
+# Supabase sconsiglia valori superiori a un giorno: questa scelta e intenzionale
+# per lasciare alle famiglie una settimana completa per usare l'invito.
+otp_expiry = 604800
 
 [auth.email.template.invite]
 subject = "Il tuo accesso a Quarto MoVimento"
@@ -66,8 +68,8 @@ content_path = "./supabase/templates/confirmation.html"
 # scanner di sicurezza della posta invece della persona. Questi due template
 # usano TokenHash e rimandano all'app, che spende il token lato browser con
 # auth.verifyOtp() (vedi assets/js/app.js, readAuthTicket/verifyOtp in init()).
-[auth.email.template.magiclink]
-subject = "Il tuo accesso a Quarto MoVimento"
+[auth.email.template.magic_link]
+subject = "Il tuo nuovo accesso a Quarto MoVimento"
 content_path = "./supabase/templates/magic-link.html"
 
 [auth.email.template.recovery]
