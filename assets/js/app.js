@@ -60,6 +60,7 @@
     filters: {
       studentSearch: "",
       studentCourse: "all",
+      studentStatus: "active",
       paymentSearch: "",
       paymentStatus: "all",
     },
@@ -940,6 +941,31 @@ function schoolClosuresForStudent(studentId) {
     return state.data
       ? state.data.enrollments.filter((item) => item.student_id === studentId)
       : [];
+  }
+
+  function latestEnrollmentForStudent(studentId) {
+    return (
+      enrollmentsForStudent(studentId)
+        .slice()
+        .sort((a, b) =>
+          String(b.starts_on || b.created_at || "").localeCompare(
+            String(a.starts_on || a.created_at || ""),
+          ),
+        )[0] || null
+    );
+  }
+
+  function displayEnrollmentForStudent(student) {
+    return student?.is_active === false
+      ? latestEnrollmentForStudent(student.id)
+      : enrollmentForStudent(student?.id);
+  }
+
+  function displayCourseForStudent(student) {
+    const enrollment = displayEnrollmentForStudent(student);
+    return enrollment
+      ? state.data.courses.find((item) => item.id === enrollment.course_id) || null
+      : null;
   }
 
   function courseRoster(courseId) {
@@ -2263,9 +2289,16 @@ function schoolClosuresForStudent(studentId) {
           ["available", "proposed", "scheduled"].includes(credit.status)
         ) {
           credit.status = "cancelled";
-          credit.reason = "Allievo eliminato dall’anagrafica attiva";
+          credit.reason = "Allievo reso non attivo";
         }
       });
+    }
+
+    async reactivateStudent(studentId) {
+      const student = this.data.students.find((item) => item.id === studentId);
+      if (!student) throw new Error("Allievo non trovato.");
+      student.is_active = true;
+      return { student };
     }
 
     async archiveCourse(courseId) {
@@ -3106,6 +3139,14 @@ function schoolClosuresForStudent(studentId) {
 
     async archiveStudent(studentId) {
       const { data, error } = await this.client.rpc("admin_archive_student", {
+        p_student_id: studentId,
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async reactivateStudent(studentId) {
+      const { data, error } = await this.client.rpc("admin_reactivate_student", {
         p_student_id: studentId,
       });
       if (error) throw error;
@@ -4073,8 +4114,10 @@ function schoolClosuresForStudent(studentId) {
     const query = state.filters.studentSearch.trim().toLowerCase();
     return state.data.students
       .filter((student) => {
-        if (student.is_active === false) return false;
-        const course = courseForStudent(student.id);
+        const isActive = student.is_active !== false;
+        if (state.filters.studentStatus === "active" && !isActive) return false;
+        if (state.filters.studentStatus === "inactive" && isActive) return false;
+        const course = displayCourseForStudent(student);
         const family = familyForStudent(student);
         const haystack = `${fullName(student)} ${student.fiscal_code || ""} ${student.residence_address || ""} ${family?.guardian_name || ""} ${familyAccessEmails(family).join(" ")}`.toLowerCase();
         const matchesSearch = !query || haystack.includes(query);
@@ -4087,9 +4130,10 @@ function schoolClosuresForStudent(studentId) {
   }
 
   function renderStudentMobileRow(student) {
-    const course = courseForStudent(student.id);
-    const enrollment = enrollmentForStudent(student.id);
+    const course = displayCourseForStudent(student);
+    const enrollment = displayEnrollmentForStudent(student);
     const family = familyForStudent(student);
+    const isActive = student.is_active !== false;
     return `
       <article class="mobile-row">
         <div class="mobile-row__top">
@@ -4097,12 +4141,12 @@ function schoolClosuresForStudent(studentId) {
             <span class="avatar avatar--aqua">${escapeHTML(initials(fullName(student)))}</span>
             <span class="person-cell__copy">
               <strong>${escapeHTML(fullName(student))}</strong>
+              ${isActive ? "" : '<span class="badge badge--plain">Non attivo</span>'}
               <span>${escapeHTML(family?.guardian_name || family?.display_name || "")}</span>
             </span>
           </div>
           <div class="row-actions">
-            <button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button>
-            <button class="row-action" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}" aria-label="Elimina allievo">${icon("trash", 16)}</button>
+            ${isActive ? `<button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button><button class="row-action" type="button" data-action="archive-student" data-student-id="${escapeHTML(student.id)}" aria-label="Rendi non attivo">${icon("x", 16)}</button>` : `<button class="row-action" type="button" data-action="reactivate-student" data-student-id="${escapeHTML(student.id)}" aria-label="Riattiva allievo">${icon("repeat", 16)}</button>`}
           </div>
         </div>
         <div class="mobile-row__meta">
@@ -4140,6 +4184,11 @@ function schoolClosuresForStudent(studentId) {
               )
               .join("")}
           </select>
+          <select class="select filter-select" id="student-status-filter" aria-label="Filtra per stato">
+            <option value="active"${state.filters.studentStatus === "active" ? " selected" : ""}>Attivi</option>
+            <option value="inactive"${state.filters.studentStatus === "inactive" ? " selected" : ""}>Non attivi</option>
+            <option value="all"${state.filters.studentStatus === "all" ? " selected" : ""}>Tutti</option>
+          </select>
         </div>
         <div class="toolbar__right">
           <span class="muted" style="font-size:11px">${students.length} risultati</span>
@@ -4163,9 +4212,10 @@ function schoolClosuresForStudent(studentId) {
               students.length
                 ? students
                     .map((student) => {
-                      const course = courseForStudent(student.id);
-                      const enrollment = enrollmentForStudent(student.id);
+                      const course = displayCourseForStudent(student);
+                      const enrollment = displayEnrollmentForStudent(student);
                       const family = familyForStudent(student);
+                      const isActive = student.is_active !== false;
                       const stats = studentAttendanceStats(student.id);
                       const balance = studentBalance(student.id);
                       return `
@@ -4175,6 +4225,7 @@ function schoolClosuresForStudent(studentId) {
                               <span class="avatar avatar--aqua">${escapeHTML(initials(fullName(student)))}</span>
                               <span class="person-cell__copy">
                                 <strong>${escapeHTML(fullName(student))}</strong>
+                                ${isActive ? "" : '<span class="badge badge--plain">Non attivo</span>'}
                                 <span>${escapeHTML(family?.guardian_name || family?.display_name || "")} · ${escapeHTML(family?.email || "")}</span>
                               </span>
                             </div>
@@ -4186,8 +4237,7 @@ function schoolClosuresForStudent(studentId) {
                           <td>
                             <div class="row-actions">
                               <button class="row-action" type="button" data-action="view-student" data-student-id="${escapeHTML(student.id)}" aria-label="Apri scheda">${icon("eye", 16)}</button>
-                              <button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button>
-                              <button class="row-action" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}" aria-label="Elimina allievo">${icon("trash", 16)}</button>
+                              ${isActive ? `<button class="row-action" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}" aria-label="Modifica">${icon("edit", 16)}</button><button class="row-action" type="button" data-action="archive-student" data-student-id="${escapeHTML(student.id)}" aria-label="Rendi non attivo">${icon("x", 16)}</button>` : `<button class="row-action" type="button" data-action="reactivate-student" data-student-id="${escapeHTML(student.id)}" aria-label="Riattiva allievo">${icon("repeat", 16)}</button>`}
                             </div>
                           </td>
                         </tr>
@@ -5870,7 +5920,7 @@ function schoolClosuresForStudent(studentId) {
         </form>
       `,
       footer: `
-        ${student ? `<button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina allievo</button>` : ""}
+        ${student ? `<button class="btn btn--danger" type="button" data-action="archive-student" data-student-id="${escapeHTML(student.id)}">${icon("x", 15)} Rendi non attivo</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button>
         <button class="btn btn--primary" type="submit" form="student-form">${student ? "Salva modifiche" : "Aggiungi allievo"}</button>
       `,
@@ -5925,7 +5975,7 @@ function schoolClosuresForStudent(studentId) {
     const family = familyForStudent(student);
     const accessEmails = familyAccessEmails(family);
     let statusError = null;
-    if (family && accessEmails.length) {
+    if (student.is_active !== false && family && accessEmails.length) {
       setButtonLoading(actionTarget, true, "Verifica…");
       try {
         const result = await state.store.getFamilyAccountStatuses({
@@ -5944,8 +5994,9 @@ function schoolClosuresForStudent(studentId) {
         setButtonLoading(actionTarget, false);
       }
     }
-    const course = courseForStudent(student.id);
-    const enrollment = enrollmentForStudent(student.id);
+    const course = displayCourseForStudent(student);
+    const enrollment = displayEnrollmentForStudent(student);
+    const isActive = student.is_active !== false;
     const individualCourse = isIndividualCourse(course);
     const individualMode = enrollmentScheduleMode(enrollment);
     const fixedIndividualSchedule = individualMode === "fixed";
@@ -5957,8 +6008,9 @@ function schoolClosuresForStudent(studentId) {
     const age = ageFromBirth(student.birth_date);
     openModal({
       title: fullName(student),
-      subtitle: `${course?.name || "Nessun corso"} · ${LABELS.plan[enrollment?.plan_type] || "piano da definire"}`,
+      subtitle: `${isActive ? "" : "Non attivo · ultimo percorso: "}${course?.name || "Nessun corso"} · ${LABELS.plan[enrollment?.plan_type] || "piano da definire"}`,
       body: `
+        ${isActive ? "" : `<div class="info-callout" style="margin-bottom:16px">${icon("info", 18)}<p>L'anagrafica e tutto lo storico sono conservati. Riattiva l'allievo quando si iscrive a un nuovo corso o laboratorio.</p></div>`}
         <div class="grid grid--stats" style="grid-template-columns:repeat(3,1fr)">
           ${statCard("Età", age == null ? "—" : age, "anni", "users")}
           ${statCard("Frequenza", `${stats.rate}%`, `${stats.present} presenze`, "check")}
@@ -5986,7 +6038,7 @@ function schoolClosuresForStudent(studentId) {
                       const presentation = familyAccountStatusPresentation(
                         familyAccountStatus(family.id, email),
                       );
-                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${presentation.canGenerate ? `<button class="btn btn--primary btn--sm" type="button" data-action="send-family-welcome-email" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" data-family-display-name="${escapeHTML(family.display_name || family.guardian_name || "")}">${icon("mail", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
+                      return `<div class="activity-item activity-item--with-action"><span class="activity-icon">${icon("mail", 16)}</span><span class="activity-copy"><strong>${escapeHTML(email)}</strong><span>${isPrimary ? "E-mail principale" : "Accesso famiglia aggiuntivo"}</span><span class="badge ${presentation.badgeClass}">${escapeHTML(presentation.label)}</span></span>${isActive && presentation.canGenerate ? `<button class="btn btn--primary btn--sm" type="button" data-action="send-family-welcome-email" data-family-id="${escapeHTML(family.id)}" data-student-id="${escapeHTML(student.id)}" data-email="${escapeHTML(email)}" data-guardian-name="${escapeHTML(isPrimary ? family.guardian_name || "" : "")}" data-family-display-name="${escapeHTML(family.display_name || family.guardian_name || "")}">${icon("mail", 15)} ${escapeHTML(presentation.buttonLabel)}</button>` : ""}</div>`;
                     },
                   )
                   .join("")
@@ -5995,7 +6047,7 @@ function schoolClosuresForStudent(studentId) {
           </div>
         </div>
         ${
-          individualCourse && enrollment
+          isActive && individualCourse && enrollment
             ? `<div class="setting-section">
                 <h3>Programmazione lezioni individuali</h3>
                 <p>Gestisci gli appuntamenti direttamente dalla scheda di ${escapeHTML(student.first_name)}.</p>
@@ -6013,10 +6065,10 @@ function schoolClosuresForStudent(studentId) {
         ${enrollment?.notes ? `<div class="setting-section"><h3>Note del piano</h3><p class="muted">${escapeHTML(enrollment.notes)}</p></div>` : ""}
       `,
       footer: `
-        <button class="btn btn--danger" type="button" data-action="delete-student" data-student-id="${escapeHTML(student.id)}">${icon("trash", 15)} Elimina</button>
-        ${canUseAdminFamilyPreview() ? `<button class="btn btn--secondary" type="button" data-action="enter-admin-family-preview" data-student-id="${escapeHTML(student.id)}">${icon("eye", 15)} Vedi area famiglia</button>` : ""}
+        ${isActive ? `<button class="btn btn--danger" type="button" data-action="archive-student" data-student-id="${escapeHTML(student.id)}">${icon("x", 15)} Rendi non attivo</button>` : `<button class="btn btn--primary" type="button" data-action="reactivate-student" data-student-id="${escapeHTML(student.id)}">${icon("repeat", 15)} Riattiva allievo</button>`}
+        ${isActive && canUseAdminFamilyPreview() ? `<button class="btn btn--secondary" type="button" data-action="enter-admin-family-preview" data-student-id="${escapeHTML(student.id)}">${icon("eye", 15)} Vedi area famiglia</button>` : ""}
         <button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>
-        <button class="btn btn--primary" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}">${icon("edit", 15)} Modifica</button>
+        ${isActive ? `<button class="btn btn--primary" type="button" data-action="edit-student" data-student-id="${escapeHTML(student.id)}">${icon("edit", 15)} Modifica</button>` : ""}
       `,
     });
   }
@@ -7820,30 +7872,59 @@ if (automaticClosure) {
     }
   }
 
-  async function handleDeleteStudentAction(actionTarget) {
+  async function handleArchiveStudentAction(actionTarget) {
     const student = state.data.students.find(
       (item) => item.id === actionTarget.dataset.studentId,
     );
     if (!student) return;
     if (
       !window.confirm(
-        `Eliminare ${fullName(student)} dagli allievi attivi? Presenze e pagamenti storici verranno conservati.`,
+        `Rendere ${fullName(student)} non attivo? L'anagrafica, le presenze e i pagamenti resteranno conservati. L'iscrizione attuale verrà chiusa.`,
       )
     ) {
       return;
     }
-    setButtonLoading(actionTarget, true, "Eliminazione…");
+    setButtonLoading(actionTarget, true, "Archiviazione…");
     try {
       await state.store.archiveStudent(student.id);
       closeModal();
       await refreshData();
       toast(
-        "Allievo eliminato",
-        "È stato rimosso dall’anagrafica attiva; lo storico resta conservato.",
+        "Allievo non attivo",
+        "L'anagrafica e lo storico sono conservati. Potrai riattivarlo in qualsiasi momento.",
       );
     } catch (error) {
       setButtonLoading(actionTarget, false);
-      toast("Allievo non eliminato", error.message, "error");
+      toast("Stato non aggiornato", error.message, "error");
+    }
+  }
+
+  async function handleReactivateStudentAction(actionTarget) {
+    const student = state.data.students.find(
+      (item) => item.id === actionTarget.dataset.studentId,
+    );
+    if (!student) return;
+    if (
+      !window.confirm(
+        `Riattivare ${fullName(student)}? L'eventuale vecchia iscrizione resterà chiusa: potrai assegnare il nuovo corso o laboratorio con “Modifica”.`,
+      )
+    ) {
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Riattivazione…");
+    try {
+      await state.store.reactivateStudent(student.id);
+      closeModal();
+      state.filters.studentStatus = "active";
+      await refreshData();
+      toast(
+        "Allievo riattivato",
+        "L'anagrafica è di nuovo attiva. Ora puoi assegnare il nuovo corso o laboratorio da Modifica.",
+        "success",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast("Allievo non riattivato", error.message, "error");
     }
   }
 
@@ -7944,8 +8025,10 @@ if (automaticClosure) {
       openStudentModal(actionTarget.dataset.studentId);
     } else if (action === "view-student") {
       await openStudentDetails(actionTarget.dataset.studentId, actionTarget);
-    } else if (action === "delete-student") {
-      await handleDeleteStudentAction(actionTarget);
+    } else if (action === "archive-student") {
+      await handleArchiveStudentAction(actionTarget);
+    } else if (action === "reactivate-student") {
+      await handleReactivateStudentAction(actionTarget);
     } else if (action === "send-family-welcome-email") {
       await handleSendFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "open-lesson-modal") {
@@ -8167,8 +8250,10 @@ if (automaticClosure) {
       await handleDeleteSchoolClosureAction(actionTarget);
     } else if (action === "edit-student") {
       openStudentModal(actionTarget.dataset.studentId);
-    } else if (action === "delete-student") {
-      await handleDeleteStudentAction(actionTarget);
+    } else if (action === "archive-student") {
+      await handleArchiveStudentAction(actionTarget);
+    } else if (action === "reactivate-student") {
+      await handleReactivateStudentAction(actionTarget);
     } else if (action === "send-family-welcome-email") {
       await handleSendFamilyWelcomeEmailAction(actionTarget);
     } else if (action === "open-individual-schedule") {
@@ -8283,6 +8368,9 @@ if (automaticClosure) {
   appRoot.addEventListener("change", (event) => {
     if (event.target.id === "student-course-filter") {
       state.filters.studentCourse = event.target.value;
+      renderShell();
+    } else if (event.target.id === "student-status-filter") {
+      state.filters.studentStatus = event.target.value;
       renderShell();
     } else if (event.target.id === "payment-status-filter") {
       state.filters.paymentStatus = event.target.value;
