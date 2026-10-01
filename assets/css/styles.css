@@ -1697,6 +1697,13 @@ h4 {
   max-width: 190px;
 }
 
+.renewal-reminder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .activity-item + .activity-item {
   border-top: 1px solid var(--line);
 }
@@ -3170,6 +3177,11 @@ h4 {
     max-width: 100%;
     grid-column: 2;
     justify-self: start;
+  }
+
+  .activity-item--with-action > .renewal-reminder-actions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 
   .toolbar {

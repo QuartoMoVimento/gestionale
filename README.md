@@ -37,6 +37,8 @@ Area amministrativa:
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
+- promemoria amministrativi, da sette giorni prima del rinnovo, per preparare
+  le nuove fatture dei piani mensili e trimestrali;
 - promemoria interni alle famiglie per gli insoluti da almeno cinque giorni;
 - invito sicuro dei familiari, senza registrazione pubblica.
 

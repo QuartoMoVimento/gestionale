@@ -193,6 +193,30 @@
     return date;
   }
 
+  function addCalendarMonths(value, amount) {
+    const source = toLocalDate(value);
+    const target = new Date(
+      source.getFullYear(),
+      source.getMonth() + amount,
+      1,
+      12,
+      0,
+      0,
+      0,
+    );
+    const lastDay = new Date(
+      target.getFullYear(),
+      target.getMonth() + 1,
+      0,
+      12,
+      0,
+      0,
+      0,
+    ).getDate();
+    target.setDate(Math.min(source.getDate(), lastDay));
+    return target;
+  }
+
   function formatDate(value, options) {
     if (!value) return "—";
     const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(value));
@@ -968,6 +992,90 @@ function schoolClosuresForStudent(studentId) {
       : null;
   }
 
+  function billingPlanMonths(planType) {
+    if (planType === "monthly") return 1;
+    if (planType === "quarterly") return 3;
+    return 0;
+  }
+
+  function billingRenewalReminderEntries() {
+    if (!state.data || state.role !== ROLE_ADMIN) return [];
+    const horizonKey = dateKey(addDays(todayKey(), 7));
+    const resolutions = state.data.billingRenewalResolutions || [];
+
+    return state.data.enrollments
+      .filter((enrollment) => {
+        return (
+          enrollment.is_active !== false &&
+          billingPlanMonths(enrollment.plan_type) > 0 &&
+          Boolean(enrollment.starts_on)
+        );
+      })
+      .map((enrollment) => {
+        const student = state.data.students.find(
+          (item) =>
+            item.id === enrollment.student_id && item.is_active !== false,
+        );
+        if (!student) return null;
+        const months = billingPlanMonths(enrollment.plan_type);
+        const billingAnchor = toLocalDate(enrollment.starts_on);
+        let candidate = null;
+
+        for (let cycle = 1; cycle <= 240; cycle += 1) {
+          const periodStartsOn = addCalendarMonths(
+            billingAnchor,
+            months * (cycle - 1),
+          );
+          const nextStartsOn = addCalendarMonths(
+            billingAnchor,
+            months * cycle,
+          );
+          const periodEndsOn = addDays(nextStartsOn, -1);
+          if (dateKey(periodEndsOn) > horizonKey) break;
+          candidate = {
+            enrollment,
+            student,
+            course: state.data.courses.find(
+              (item) => item.id === enrollment.course_id,
+            ),
+            periodStartsOn: dateKey(periodStartsOn),
+            periodEndsOn: dateKey(periodEndsOn),
+            nextStartsOn: dateKey(nextStartsOn),
+            nextEndsOn: dateKey(
+              addDays(
+                addCalendarMonths(billingAnchor, months * (cycle + 1)),
+                -1,
+              ),
+            ),
+          };
+        }
+
+        if (!candidate) return null;
+        const resolved = resolutions.some(
+          (item) =>
+            item.enrollment_id === enrollment.id &&
+            item.period_ends_on === candidate.periodEndsOn,
+        );
+        return resolved ? null : candidate;
+      })
+      .filter(Boolean)
+      .sort((a, b) => {
+        const byDate = a.periodEndsOn.localeCompare(b.periodEndsOn);
+        return byDate || fullName(a.student).localeCompare(fullName(b.student), "it");
+      });
+  }
+
+  function billingRenewalTitle(entry) {
+    if (entry.enrollment.plan_type === "monthly") {
+      return `Mensile ${formatMonth(entry.nextStartsOn)}`;
+    }
+    return `Trimestre ${formatDate(entry.nextStartsOn, { month: "short", year: "numeric" })} – ${formatDate(entry.nextEndsOn, { month: "short", year: "numeric" })}`;
+  }
+
+  function billingRenewalDescription(entry) {
+    return `Periodo dal ${formatDate(entry.nextStartsOn)} al ${formatDate(entry.nextEndsOn)}`;
+  }
+
   function courseRoster(courseId) {
     if (!state.data) return [];
     return state.data.enrollments
@@ -1450,6 +1558,9 @@ function schoolClosuresForStudent(studentId) {
       if (!Array.isArray(this.data.schoolClosures)) {
         this.data.schoolClosures = [];
       }
+      if (!Array.isArray(this.data.billingRenewalResolutions)) {
+        this.data.billingRenewalResolutions = [];
+      }
     }
 
     async loadData(role) {
@@ -1507,6 +1618,7 @@ function schoolClosuresForStudent(studentId) {
         copy.paymentReminders = (copy.paymentReminders || []).filter((item) =>
           invoiceIds.includes(item.invoice_id),
         );
+        copy.billingRenewalResolutions = [];
         copy.makeupCredits = copy.makeupCredits.filter((item) =>
           studentIds.includes(item.student_id),
         );
@@ -2344,6 +2456,38 @@ function schoolClosuresForStudent(studentId) {
       return invoice;
     }
 
+    async saveBillingRenewalInvoice(payload) {
+      const invoice = await this.saveInvoice(payload);
+      this.data.billingRenewalResolutions.push({
+        id: `renewal-resolution-${Date.now()}`,
+        enrollment_id: payload.renewal_enrollment_id,
+        period_ends_on: payload.renewal_period_ends_on,
+        resolution: "invoice_created",
+        invoice_id: invoice.id,
+        resolved_at: new Date().toISOString(),
+      });
+      return { invoice, period_ends_on: payload.renewal_period_ends_on };
+    }
+
+    async markBillingRenewalHandled(enrollmentId, periodEndsOn) {
+      const existing = this.data.billingRenewalResolutions.find(
+        (item) =>
+          item.enrollment_id === enrollmentId &&
+          item.period_ends_on === periodEndsOn,
+      );
+      const resolution = {
+        id: existing?.id || `renewal-resolution-${Date.now()}`,
+        enrollment_id: enrollmentId,
+        period_ends_on: periodEndsOn,
+        resolution: "already_handled",
+        invoice_id: null,
+        resolved_at: new Date().toISOString(),
+      };
+      if (existing) Object.assign(existing, resolution);
+      else this.data.billingRenewalResolutions.push(resolution);
+      return resolution;
+    }
+
     async updateInvoice(payload) {
       const invoice = this.data.invoices.find(
         (item) => item.id === payload.invoiceId,
@@ -2881,6 +3025,7 @@ function schoolClosuresForStudent(studentId) {
         payments,
         bankTransferNotices,
         paymentReminderResult,
+        billingRenewalResolutions,
         makeupCredits,
         settingRows,
       ] = await Promise.all([
@@ -2923,6 +3068,11 @@ function schoolClosuresForStudent(studentId) {
           query.order("created_at", { ascending: false }),
         ),
         this.loadPaymentReminders(),
+        role === ROLE_ADMIN
+          ? this.query("billing_renewal_resolutions", "*", (query) =>
+              query.order("period_ends_on", { ascending: false }),
+            )
+          : Promise.resolve([]),
         this.query("makeup_credits", "*", (query) =>
           query.order("created_at", { ascending: false }),
         ),
@@ -2950,6 +3100,7 @@ function schoolClosuresForStudent(studentId) {
         bankTransferNotices,
         paymentReminders: paymentReminderResult.rows,
         paymentRemindersAvailable: paymentReminderResult.available,
+        billingRenewalResolutions,
         makeupCredits,
         settings,
       };
@@ -3180,6 +3331,40 @@ function schoolClosuresForStudent(studentId) {
         .insert(values)
         .select()
         .single();
+      if (error) throw error;
+      return data;
+    }
+
+    async saveBillingRenewalInvoice(payload) {
+      const values = {
+        number:
+          payload.number ||
+          `QM-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`,
+        title: payload.title,
+        description: payload.description || "",
+        total_cents: Math.round(Number(payload.amount_eur) * 100),
+        due_date: payload.due_date,
+      };
+      const { data, error } = await this.client.rpc(
+        "admin_create_billing_renewal_invoice",
+        {
+          p_enrollment_id: payload.renewal_enrollment_id,
+          p_period_ends_on: payload.renewal_period_ends_on,
+          p_payload: values,
+        },
+      );
+      if (error) throw error;
+      return data;
+    }
+
+    async markBillingRenewalHandled(enrollmentId, periodEndsOn) {
+      const { data, error } = await this.client.rpc(
+        "admin_mark_billing_renewal_handled",
+        {
+          p_enrollment_id: enrollmentId,
+          p_period_ends_on: periodEndsOn,
+        },
+      );
       if (error) throw error;
       return data;
     }
@@ -3766,6 +3951,7 @@ function schoolClosuresForStudent(studentId) {
     const availableMakeups = state.data.makeupCredits.filter(
       (item) => makeupEffectiveStatus(item) === "available",
     );
+    const billingRenewalReminders = billingRenewalReminderEntries();
     const markedToday = todayLessons.reduce(
       (total, lesson) =>
         total +
@@ -3826,6 +4012,37 @@ function schoolClosuresForStudent(studentId) {
           "repeat",
         )}
       </section>
+
+      ${
+        billingRenewalReminders.length
+          ? `<section class="card card--tinted-yellow" style="margin-top:18px">
+              <header class="card-header">
+                <div>
+                  <h2>Fatture dei rinnovi da preparare</h2>
+                  <p>Mensili e trimestrali vicini alla fine del periodo · gli annuali sono esclusi.</p>
+                </div>
+                <span class="badge badge--warning">${billingRenewalReminders.length} ${billingRenewalReminders.length === 1 ? "promemoria" : "promemoria"}</span>
+              </header>
+              <div class="activity-list">
+                ${billingRenewalReminders
+                  .map(
+                    (entry) => `<div class="activity-item activity-item--with-action">
+                      <span class="activity-icon">${icon("bell", 16)}</span>
+                      <span class="activity-copy">
+                        <strong>${escapeHTML(fullName(entry.student))} · ${escapeHTML(LABELS.plan[entry.enrollment.plan_type])}</strong>
+                        <span>${escapeHTML(entry.course?.name || "Corso da verificare")} · periodo in scadenza il ${escapeHTML(formatDate(entry.periodEndsOn))}</span>
+                      </span>
+                      <span class="renewal-reminder-actions">
+                        <button class="btn btn--secondary btn--sm" type="button" data-action="mark-billing-renewal-handled" data-enrollment-id="${escapeHTML(entry.enrollment.id)}" data-period-ends-on="${escapeHTML(entry.periodEndsOn)}">Già gestita</button>
+                        <button class="btn btn--primary btn--sm" type="button" data-action="open-billing-renewal-invoice" data-enrollment-id="${escapeHTML(entry.enrollment.id)}" data-period-ends-on="${escapeHTML(entry.periodEndsOn)}">${icon("receipt", 15)} Prepara fattura</button>
+                      </span>
+                    </div>`,
+                  )
+                  .join("")}
+              </div>
+            </section>`
+          : ""
+      }
 
       <section class="grid grid--dashboard" style="margin-top:18px">
         <article class="card">
@@ -3900,10 +4117,7 @@ function schoolClosuresForStudent(studentId) {
             ${state.data.courses
               .filter((course) => course.is_active !== false)
               .map((course) => {
-                const count = state.data.enrollments.filter(
-                  (item) =>
-                    item.course_id === course.id && item.is_active !== false,
-                ).length;
+                const count = courseRoster(course.id).length;
                 const capacity = Number(course.capacity || 6);
                 const percentage = Math.min(
                   100,
@@ -6564,7 +6778,62 @@ if (automaticClosure) {
     });
   }
 
-  function openInvoiceModal(invoiceId) {
+  function billingRenewalEntryFromAction(actionTarget) {
+    return billingRenewalReminderEntries().find(
+      (entry) =>
+        entry.enrollment.id === actionTarget.dataset.enrollmentId &&
+        entry.periodEndsOn === actionTarget.dataset.periodEndsOn,
+    );
+  }
+
+  function openBillingRenewalInvoiceModal(actionTarget) {
+    const entry = billingRenewalEntryFromAction(actionTarget);
+    if (!entry) {
+      toast(
+        "Promemoria non disponibile",
+        "Potrebbe essere già stato gestito. Aggiorna la pagina e riprova.",
+        "error",
+      );
+      return;
+    }
+    openInvoiceModal(null, {
+      student_id: entry.student.id,
+      title: billingRenewalTitle(entry),
+      description: billingRenewalDescription(entry),
+      due_date: entry.nextStartsOn,
+      renewal_enrollment_id: entry.enrollment.id,
+      renewal_period_ends_on: entry.periodEndsOn,
+    });
+  }
+
+  async function handleBillingRenewalHandledAction(actionTarget) {
+    const entry = billingRenewalEntryFromAction(actionTarget);
+    if (!entry) return;
+    if (
+      !window.confirm(
+        `Segnare come già gestita la nuova fattura per ${fullName(entry.student)}? Il promemoria di questo periodo non comparirà più.`,
+      )
+    ) {
+      return;
+    }
+    setButtonLoading(actionTarget, true, "Salvataggio…");
+    try {
+      await state.store.markBillingRenewalHandled(
+        entry.enrollment.id,
+        entry.periodEndsOn,
+      );
+      await refreshData();
+      toast(
+        "Promemoria archiviato",
+        "La fattura risulta già gestita e non verrà richiesta di nuovo per questo periodo.",
+      );
+    } catch (error) {
+      setButtonLoading(actionTarget, false);
+      toast("Promemoria non aggiornato", error.message, "error");
+    }
+  }
+
+  function openInvoiceModal(invoiceId, defaults = {}) {
     const invoice = invoiceId
       ? state.data.invoices.find((item) => item.id === invoiceId)
       : null;
@@ -6575,19 +6844,22 @@ if (automaticClosure) {
       title: invoice ? "Modifica scadenza" : "Nuova scadenza",
       subtitle: invoice
         ? `${invoice.number} · ${fullName(student)}`
-        : "Crea una quota, una rata o un’altra voce da pagare.",
+        : defaults.renewal_enrollment_id
+          ? "Completa importo e numero: la famiglia vedrà subito la nuova scadenza."
+          : "Crea una quota, una rata o un’altra voce da pagare.",
       body: `
         <form id="invoice-form">
           ${invoice ? `<input type="hidden" name="invoice_id" value="${escapeHTML(invoice.id)}" />` : ""}
+          ${defaults.renewal_enrollment_id ? `<input type="hidden" name="renewal_enrollment_id" value="${escapeHTML(defaults.renewal_enrollment_id)}" /><input type="hidden" name="renewal_period_ends_on" value="${escapeHTML(defaults.renewal_period_ends_on)}" />` : ""}
           <div class="form-grid">
-            ${invoice ? `<div class="field field--full"><label for="invoice-student-display">Allievo</label><input class="input" id="invoice-student-display" value="${escapeHTML(fullName(student))}" readonly /></div>` : `<div class="field field--full"><label for="invoice-student">Allievo</label><select class="select" id="invoice-student" name="student_id" required><option value="">Scegli l’allievo</option>${state.data.students.filter((item) => item.is_active !== false).map((item) => `<option value="${escapeHTML(item.id)}">${escapeHTML(fullName(item))}</option>`).join("")}</select></div>`}
-            <div class="field field--full"><label for="invoice-title">Voce</label><input class="input" id="invoice-title" name="title" maxlength="200" value="${escapeHTML(invoice?.title || "")}" placeholder="Es. Seconda rata abbonamento" required /></div>
-            <div class="field field--full"><label for="invoice-description">Descrizione</label><input class="input" id="invoice-description" name="description" maxlength="1000" value="${escapeHTML(invoice?.description || "")}" placeholder="Facoltativa" /></div>
+            ${invoice ? `<div class="field field--full"><label for="invoice-student-display">Allievo</label><input class="input" id="invoice-student-display" value="${escapeHTML(fullName(student))}" readonly /></div>` : `<div class="field field--full"><label for="invoice-student">Allievo</label><select class="select" id="invoice-student" name="student_id" required><option value="">Scegli l’allievo</option>${state.data.students.filter((item) => item.is_active !== false).map((item) => `<option value="${escapeHTML(item.id)}"${item.id === defaults.student_id ? " selected" : ""}>${escapeHTML(fullName(item))}</option>`).join("")}</select></div>`}
+            <div class="field field--full"><label for="invoice-title">Voce</label><input class="input" id="invoice-title" name="title" maxlength="200" value="${escapeHTML(invoice?.title || defaults.title || "")}" placeholder="Es. Seconda rata abbonamento" required /></div>
+            <div class="field field--full"><label for="invoice-description">Descrizione</label><input class="input" id="invoice-description" name="description" maxlength="1000" value="${escapeHTML(invoice?.description || defaults.description || "")}" placeholder="Facoltativa" /></div>
             <div class="field"><label for="invoice-amount">Importo (€)</label><input class="input" id="invoice-amount" name="amount_eur" type="number" min="${escapeHTML((minimumCents / 100).toFixed(2))}" step="0.01" inputmode="decimal" value="${invoice ? escapeHTML((Number(invoice.total_cents || 0) / 100).toFixed(2)) : ""}" required />${invoicePaidCents(invoice) > 0 ? `<p class="field-hint">Non può essere inferiore a ${escapeHTML(formatMoney(invoicePaidCents(invoice), invoice.currency))}, già incassati.</p>` : ""}</div>
-            <div class="field"><label for="invoice-due">Scadenza</label><input class="input" id="invoice-due" name="due_date" type="date" value="${escapeHTML(invoice?.due_date || todayKey())}" required /></div>
+            <div class="field"><label for="invoice-due">Scadenza</label><input class="input" id="invoice-due" name="due_date" type="date" value="${escapeHTML(invoice?.due_date || defaults.due_date || todayKey())}" required /></div>
             <div class="field field--full"><label for="invoice-number">Numero fattura</label><input class="input" id="invoice-number" name="number" maxlength="100" value="${escapeHTML(invoice?.number || "")}" placeholder="Generato automaticamente se lasciato vuoto"${invoice ? " required" : ""} /></div>
           </div>
-          ${invoice ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Se modifichi importo o scadenza, il saldo e lo stato verranno ricalcolati automaticamente.</p></div>` : ""}
+          ${invoice ? `<div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Se modifichi importo o scadenza, il saldo e lo stato verranno ricalcolati automaticamente.</p></div>` : defaults.renewal_enrollment_id ? `<div class="info-callout" style="margin-top:16px">${icon("bell", 17)}<p>Questa fattura chiuderà automaticamente il promemoria del periodo terminato il ${escapeHTML(formatDate(defaults.renewal_period_ends_on))}.</p></div>` : ""}
         </form>
       `,
       footer: `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="invoice-form">${icon(invoice ? "edit" : "plus", 15)} ${invoice ? "Salva modifiche" : "Crea scadenza"}</button>`,
@@ -8056,6 +8328,10 @@ if (automaticClosure) {
       openCourseModal(actionTarget.dataset.courseId);
     } else if (action === "delete-course") {
       await handleDeleteCourseAction(actionTarget);
+    } else if (action === "open-billing-renewal-invoice") {
+      openBillingRenewalInvoiceModal(actionTarget);
+    } else if (action === "mark-billing-renewal-handled") {
+      await handleBillingRenewalHandledAction(actionTarget);
     } else if (action === "open-invoice-modal") {
       openInvoiceModal();
     } else if (action === "view-invoice") {
@@ -8737,17 +9013,26 @@ if (automaticClosure) {
             (item) => item.id === values.student_id,
           );
           if (!student) throw new Error("Seleziona un allievo.");
-          await state.store.saveInvoice({
+          const invoicePayload = {
             ...values,
             title,
             number,
             family_id: student.family_id,
-          });
+          };
+          if (values.renewal_enrollment_id) {
+            await state.store.saveBillingRenewalInvoice(invoicePayload);
+          } else {
+            await state.store.saveInvoice(invoicePayload);
+          }
           closeModal();
           await refreshData();
           toast(
-            "Scadenza creata",
-            "La famiglia può ora visualizzarla nella propria area.",
+            values.renewal_enrollment_id
+              ? "Fattura del rinnovo preparata"
+              : "Scadenza creata",
+            values.renewal_enrollment_id
+              ? "Il promemoria è stato chiuso e la famiglia può visualizzare il nuovo pagamento."
+              : "La famiglia può ora visualizzarla nella propria area.",
           );
         }
       } else if (formId === "void-invoice-form") {
