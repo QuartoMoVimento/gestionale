@@ -1285,6 +1285,23 @@ function schoolClosuresForStudent(studentId) {
       : null;
   }
 
+  function makeupCreditForLessonStudent(lessonId, studentId) {
+    if (!state.data || !lessonId || !studentId) return null;
+    return state.data.makeupCredits.find(
+      (credit) =>
+        credit.student_id === studentId &&
+        credit.used_lesson_id === lessonId &&
+        ["scheduled", "used"].includes(credit.status),
+    );
+  }
+
+  function lessonIsMakeupForStudent(lesson, studentId) {
+    return Boolean(
+      ["makeup", "recovery"].includes(lesson?.lesson_type) ||
+        makeupCreditForLessonStudent(lesson?.id, studentId),
+    );
+  }
+
   function studentsForLesson(lesson) {
     if (!state.data) return [];
     const isMakeupSession = ["makeup", "recovery"].includes(
@@ -1589,13 +1606,26 @@ function schoolClosuresForStudent(studentId) {
           studentIds.includes(item.student_id),
         );
         const courseIds = copy.enrollments.map((item) => item.course_id);
+        const familyMakeupCredits = copy.makeupCredits.filter((item) =>
+          studentIds.includes(item.student_id),
+        );
+        const assignedLessonIds = new Set(
+          familyMakeupCredits
+            .filter((item) => ["scheduled", "used"].includes(item.status))
+            .map((item) => item.used_lesson_id)
+            .filter(Boolean),
+        );
+        const assignedCourseIds = copy.lessons
+          .filter((item) => assignedLessonIds.has(item.id))
+          .map((item) => item.course_id);
         copy.courses = copy.courses.filter((item) =>
-          courseIds.includes(item.id),
+          [...courseIds, ...assignedCourseIds].includes(item.id),
         );
         copy.lessons = copy.lessons.filter(
           (item) =>
-            courseIds.includes(item.course_id) &&
-            (!item.student_id || studentIds.includes(item.student_id)),
+            (courseIds.includes(item.course_id) &&
+              (!item.student_id || studentIds.includes(item.student_id))) ||
+            assignedLessonIds.has(item.id),
         );
         const lessonIds = copy.lessons.map((item) => item.id);
         copy.attendance = copy.attendance.filter(
@@ -1619,9 +1649,7 @@ function schoolClosuresForStudent(studentId) {
           invoiceIds.includes(item.invoice_id),
         );
         copy.billingRenewalResolutions = [];
-        copy.makeupCredits = copy.makeupCredits.filter((item) =>
-          studentIds.includes(item.student_id),
-        );
+        copy.makeupCredits = familyMakeupCredits;
       }
       return copy;
     }
@@ -2821,6 +2849,89 @@ function schoolClosuresForStudent(studentId) {
       credit.status = "scheduled";
     }
 
+    async scheduleManualMakeup(payload) {
+      const student = this.data.students.find(
+        (item) => item.id === payload.student_id && item.is_active !== false,
+      );
+      const enrollment = this.data.enrollments.find(
+        (item) => item.student_id === payload.student_id && item.is_active !== false,
+      );
+      const course = enrollment
+        ? this.data.courses.find((item) => item.id === enrollment.course_id)
+        : null;
+      if (!student || !enrollment || !course) {
+        throw new Error("L’allievo non ha un’iscrizione attiva.");
+      }
+
+      let lesson = null;
+      if (payload.mode === "group") {
+        lesson = this.data.lessons.find(
+          (item) =>
+            item.id === payload.target_lesson_id &&
+            item.status === "scheduled" &&
+            new Date(item.starts_at) > new Date(),
+        );
+        if (!lesson) throw new Error("La lezione di gruppo non è disponibile.");
+      } else {
+        const start = new Date(payload.starts_at);
+        lesson = {
+          id: `lesson-manual-makeup-${Date.now()}`,
+          course_id: course.id,
+          student_id: null,
+          enrollment_id: null,
+          starts_at: start.toISOString(),
+          ends_at: new Date(
+            start.getTime() + Number(payload.duration_minutes || 50) * 60000,
+          ).toISOString(),
+          lesson_type: "makeup",
+          status: "scheduled",
+          title: `Recupero individuale · ${fullName(student)}`,
+          location: course.location || "",
+          notes: "Recupero programmato manualmente",
+          origin: "manual",
+          occurrence_on: null,
+        };
+        this.data.lessons.push(lesson);
+      }
+
+      let credit = payload.credit_id
+        ? this.data.makeupCredits.find(
+            (item) =>
+              item.id === payload.credit_id &&
+              item.student_id === student.id &&
+              ["available", "proposed", "not_eligible"].includes(item.status),
+          )
+        : null;
+      if (payload.credit_id && !credit) {
+        throw new Error("Il recupero selezionato non è più programmabile.");
+      }
+      if (!credit) {
+        credit = {
+          id: `makeup-manual-${Date.now()}`,
+          student_id: student.id,
+          enrollment_id: enrollment.id,
+          source_lesson_id: null,
+          used_lesson_id: null,
+          status: "available",
+          reason: "Recupero aggiunto manualmente da Valeria",
+          expires_on: null,
+          used_at: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        this.data.makeupCredits.unshift(credit);
+      }
+      Object.assign(credit, {
+        enrollment_id: enrollment.id,
+        used_lesson_id: lesson.id,
+        status: "scheduled",
+        reason: "Recupero programmato manualmente da Valeria",
+        used_at: null,
+        updated_at: new Date().toISOString(),
+      });
+      return { credit, lesson };
+    }
+
     async saveSettings(values) {
       Object.assign(this.data.settings, values);
     }
@@ -3467,6 +3578,24 @@ function schoolClosuresForStudent(studentId) {
       return data;
     }
 
+    async scheduleManualMakeup(payload) {
+      const { data, error } = await this.client.rpc(
+        "admin_schedule_manual_makeup",
+        {
+          p_student_id: payload.student_id,
+          p_credit_id: payload.credit_id || null,
+          p_mode: payload.mode,
+          p_target_lesson_id: payload.target_lesson_id || null,
+          p_starts_at: payload.starts_at || null,
+          p_duration_minutes: payload.duration_minutes
+            ? Number(payload.duration_minutes)
+            : null,
+        },
+      );
+      if (error) throw error;
+      return data;
+    }
+
     async saveSettings(values) {
       const rows = Object.entries(values).map(([key, value]) => ({
         key,
@@ -3905,13 +4034,19 @@ function schoolClosuresForStudent(studentId) {
           .map((lesson) => {
             const course = courseForLesson(lesson);
             const count = studentsForLesson(lesson).length;
+            const familyStudent =
+              state.role === ROLE_FAMILY ? getSelectedStudent() : null;
+            const isMakeup = lessonIsMakeupForStudent(
+              lesson,
+              familyStudent?.id,
+            );
             return `
               <div class="schedule-item">
                 <span class="schedule-time">${escapeHTML(formatTime(lesson.starts_at))}</span>
                 <span class="schedule-line" style="background:${safeColor(course?.color)}"></span>
                 <span class="schedule-copy">
                   <strong>${escapeHTML(lesson.title || course?.name || "Lezione")}</strong>
-                  <span>${escapeHTML(lesson.location || course?.location || "Studio Quarto MoVimento")}${lesson.lesson_type === "makeup" || lesson.lesson_type === "recovery" ? " · Recupero" : ""}</span>
+                  <span>${escapeHTML(lesson.location || course?.location || "Studio Quarto MoVimento")}${isMakeup ? " · Recupero" : ""}</span>
                 </span>
                 <span class="schedule-count">${count} ${count === 1 ? "allievo" : "allievi"}</span>
               </div>
@@ -4974,7 +5109,7 @@ function schoolClosuresForStudent(studentId) {
         <span class="makeup-copy">
           <strong>${escapeHTML(fullName(student))}</strong>
           <span>
-            ${source ? `Assenza del ${escapeHTML(formatDate(source.starts_at))}` : "Lezione di origine non disponibile"}
+            ${source ? `Assenza del ${escapeHTML(formatDate(source.starts_at))}` : "Recupero manuale"}
             ${target ? ` · assegnato al ${escapeHTML(formatDate(target.starts_at))} alle ${escapeHTML(formatTime(target.starts_at))}` : ""}
             ${credit.expires_on ? ` · scade ${escapeHTML(formatDate(credit.expires_on))}` : ""}
           </span>
@@ -4982,7 +5117,7 @@ function schoolClosuresForStudent(studentId) {
         </span>
         <span style="display:flex;align-items:flex-end;flex-direction:column;gap:7px">
           ${statusBadge("makeup", status)}
-          ${status === "available" ? `<button class="btn btn--primary btn--sm" type="button" data-action="assign-makeup" data-credit-id="${escapeHTML(credit.id)}">Assegna</button>` : ""}
+          ${["available", "not_eligible", "proposed"].includes(status) ? `<button class="btn btn--primary btn--sm" type="button" data-action="program-makeup" data-credit-id="${escapeHTML(credit.id)}" data-student-id="${escapeHTML(credit.student_id)}">Programma</button>` : ""}
         </span>
       </div>
     `;
@@ -5014,8 +5149,8 @@ function schoolClosuresForStudent(studentId) {
       ${pageHeader(
         "Organizzazione",
         "Recuperi",
-        "Assegna i crediti maturati a una sessione compatibile.",
-        `<button class="btn btn--primary" type="button" data-action="open-lesson-modal" data-lesson-type="makeup">${icon("plus", 16)} Crea sessione di recupero</button>`,
+        "Programma tu i recuperi, anche quando non sono previsti automaticamente dal piano.",
+        `<button class="btn btn--primary" type="button" data-action="program-makeup">${icon("plus", 16)} Programma recupero</button>`,
       )}
       <section class="grid grid--stats">
         ${statCard("Da assegnare", available.length, "Crediti disponibili", "repeat")}
@@ -5026,7 +5161,7 @@ function schoolClosuresForStudent(studentId) {
       <section class="grid grid--family" style="margin-top:22px">
         <article class="card">
           <header class="card-header">
-            <div><h2>Crediti da programmare</h2><p>La compatibilità di corso, data e scadenza viene verificata anche dal database.</p></div>
+            <div><h2>Crediti da programmare</h2><p>Scegli tu il gruppo o una data individuale, anche come eccezione al piano.</p></div>
           </header>
           ${
             available.length
@@ -5386,8 +5521,9 @@ function schoolClosuresForStudent(studentId) {
     return state.data.lessons
       .filter((lesson) => {
         if (lessonIsOnSchoolClosure(lesson)) return false;
+        if (assignedLessonIds.has(lesson.id)) return true;
         if (["makeup", "recovery"].includes(lesson.lesson_type)) {
-          return assignedLessonIds.has(lesson.id);
+          return false;
         }
         if (lesson.student_id) return lesson.student_id === studentId;
         return enrollments.some(
@@ -5486,6 +5622,10 @@ function schoolClosuresForStudent(studentId) {
         String(lesson.status).startsWith("cancelled"),
     );
     const nextLesson = upcoming[0] || null;
+    const nextLessonIsMakeup = lessonIsMakeupForStudent(
+      nextLesson,
+      student.id,
+    );
     const stats = studentAttendanceStats(student.id);
     const makeups = state.data.makeupCredits.filter(
       (item) =>
@@ -5526,7 +5666,7 @@ function schoolClosuresForStudent(studentId) {
       <section class="grid grid--family">
         <article class="hero-card">
           <div class="hero-card__content">
-            <span class="hero-card__kicker">${nextLesson ? "Prossima lezione" : "Calendario"}</span>
+            <span class="hero-card__kicker">${nextLesson ? nextLessonIsMakeup ? "Prossimo recupero" : "Prossima lezione" : "Calendario"}</span>
             ${
               nextLesson
                 ? `
@@ -5537,7 +5677,7 @@ function schoolClosuresForStudent(studentId) {
                       month: "long",
                     }),
                   )}</h2>
-                  <p>${escapeHTML(nextLesson.title || course?.name || "Lezione")} con Valeria. Ti aspettiamo allo Studio Quarto MoVimento!</p>
+                  <p>${escapeHTML(nextLesson.title || courseForLesson(nextLesson)?.name || course?.name || "Lezione")} con Valeria.${nextLessonIsMakeup ? " Questo appuntamento è un recupero." : ""} Ti aspettiamo allo Studio Quarto MoVimento!</p>
                   <div class="hero-card__meta">
                     <span class="hero-chip">${icon("clock", 14)} ${escapeHTML(formatTime(nextLesson.starts_at))}–${escapeHTML(formatTime(nextLesson.ends_at))}</span>
                     <span class="hero-chip">${icon("map", 14)} ${escapeHTML(nextLesson.location || course?.location || "Studio")}</span>
@@ -5674,8 +5814,9 @@ function schoolClosuresForStudent(studentId) {
                     }
                     const lesson = entry.lesson;
                     const course = courseForLesson(lesson);
-                    const isMakeup = ["makeup", "recovery"].includes(
-                      lesson.lesson_type,
+                    const isMakeup = lessonIsMakeupForStudent(
+                      lesson,
+                      student.id,
                     );
                     const isCancelled = String(lesson.status).startsWith(
                       "cancelled",
@@ -6552,6 +6693,183 @@ if (automaticClosure) {
         ? `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="assign-makeup-form">Assegna recupero</button>`
         : `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button><button class="btn btn--primary" type="button" data-action="create-makeup-lesson" data-course-id="${escapeHTML(source?.course_id || "")}">${icon("plus", 15)} Crea sessione</button>`,
     });
+  }
+
+  function manualMakeupCreditOptions(studentId, selectedCreditId = "") {
+    const credits = state.data.makeupCredits
+      .filter(
+        (credit) =>
+          credit.student_id === studentId &&
+          ["available", "proposed", "not_eligible"].includes(
+            makeupEffectiveStatus(credit),
+          ),
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.created_at || 0) - new Date(a.created_at || 0),
+      );
+    return [
+      `<option value="">Nessuna assenza collegata · crea recupero manuale</option>`,
+      ...credits.map((credit) => {
+        const source = state.data.lessons.find(
+          (lesson) => lesson.id === credit.source_lesson_id,
+        );
+        const label = source
+          ? `Assenza del ${formatDate(source.starts_at)} · ${credit.reason || "credito esistente"}`
+          : credit.reason || "Recupero esistente";
+        return `<option value="${escapeHTML(credit.id)}"${credit.id === selectedCreditId ? " selected" : ""}>${escapeHTML(label)}</option>`;
+      }),
+    ].join("");
+  }
+
+  function manualMakeupGroupLessonOptions() {
+    return state.data.lessons
+      .filter((lesson) => {
+        const course = courseForLesson(lesson);
+        return (
+          lesson.status === "scheduled" &&
+          lesson.lesson_type === "regular" &&
+          !lesson.student_id &&
+          !isIndividualCourse(course) &&
+          new Date(lesson.starts_at) > new Date() &&
+          !lessonIsOnSchoolClosure(lesson)
+        );
+      })
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))
+      .map((lesson) => {
+        const course = courseForLesson(lesson);
+        const enrolled = studentsForLesson(lesson).length;
+        const capacity = Number(course?.capacity || 0);
+        const places = capacity ? ` · ${enrolled}/${capacity} allievi` : "";
+        return `<option value="${escapeHTML(lesson.id)}">${escapeHTML(course?.name || "Corso")} · ${escapeHTML(formatDate(lesson.starts_at, { weekday: "short", day: "numeric", month: "long" }))} · ${escapeHTML(formatTime(lesson.starts_at))}${escapeHTML(places)}</option>`;
+      })
+      .join("");
+  }
+
+  function updateProgramMakeupModal(studentId, setDefaultMode = false) {
+    const student = state.data.students.find((item) => item.id === studentId);
+    const enrollment = enrollmentForStudent(studentId);
+    const course = enrollment
+      ? state.data.courses.find((item) => item.id === enrollment.course_id)
+      : null;
+    const creditSelect = document.getElementById("manual-makeup-credit");
+    if (creditSelect) {
+      const currentCreditId = creditSelect.value;
+      creditSelect.innerHTML = manualMakeupCreditOptions(
+        studentId,
+        currentCreditId,
+      );
+    }
+    const modeSelect = document.getElementById("manual-makeup-mode");
+    if (modeSelect && setDefaultMode) {
+      modeSelect.value = isIndividualCourse(course) ? "individual" : "group";
+    }
+    const mode = modeSelect?.value || "group";
+    const groupFields = document.getElementById("manual-makeup-group-fields");
+    const individualFields = document.getElementById(
+      "manual-makeup-individual-fields",
+    );
+    if (groupFields) groupFields.hidden = mode !== "group";
+    if (individualFields) individualFields.hidden = mode !== "individual";
+    const target = document.getElementById("manual-makeup-target-lesson");
+    const date = document.getElementById("manual-makeup-date");
+    const time = document.getElementById("manual-makeup-time");
+    const duration = document.getElementById("manual-makeup-duration");
+    if (target) target.required = mode === "group";
+    if (date) date.required = mode === "individual";
+    if (time) time.required = mode === "individual";
+    if (duration) {
+      duration.required = mode === "individual";
+      if (setDefaultMode) {
+        duration.value =
+          enrollment?.lesson_duration_minutes || course?.duration_minutes || 50;
+      }
+    }
+    const courseHint = document.getElementById("manual-makeup-course-hint");
+    if (courseHint) {
+      courseHint.textContent = student && course
+        ? `${fullName(student)} è iscritto a ${course.name}.`
+        : "L’allievo deve avere un’iscrizione attiva.";
+    }
+  }
+
+  function openProgramMakeupModal(creditId = "", studentId = "") {
+    const activeStudents = state.data.students
+      .filter(
+        (student) =>
+          student.is_active !== false && Boolean(enrollmentForStudent(student.id)),
+      )
+      .sort((a, b) => fullName(a).localeCompare(fullName(b), "it"));
+    const selectedCredit = creditId
+      ? state.data.makeupCredits.find((item) => item.id === creditId)
+      : null;
+    const selectedStudentId =
+      studentId || selectedCredit?.student_id || activeStudents[0]?.id || "";
+    const selectedEnrollment = enrollmentForStudent(selectedStudentId);
+    const selectedCourse = selectedEnrollment
+      ? state.data.courses.find(
+          (item) => item.id === selectedEnrollment.course_id,
+        )
+      : null;
+    const defaultMode = isIndividualCourse(selectedCourse)
+      ? "individual"
+      : "group";
+    const tomorrow = dateKey(addDays(new Date(), 1));
+    const groupOptions = manualMakeupGroupLessonOptions();
+    openModal({
+      title: "Programma recupero",
+      subtitle: "Decidi tu il recupero, anche se il piano non lo prevede automaticamente.",
+      className: "modal--lg",
+      body: activeStudents.length
+        ? `
+          <form id="manual-makeup-form">
+            <div class="form-grid">
+              <div class="field field--full">
+                <label for="manual-makeup-student">Allievo</label>
+                <select class="select" id="manual-makeup-student" name="student_id" required>
+                  ${activeStudents.map((student) => `<option value="${escapeHTML(student.id)}"${student.id === selectedStudentId ? " selected" : ""}>${escapeHTML(fullName(student))}</option>`).join("")}
+                </select>
+                <p class="field-hint" id="manual-makeup-course-hint"></p>
+              </div>
+              <div class="field field--full">
+                <label for="manual-makeup-credit">Assenza/credito da usare</label>
+                <select class="select" id="manual-makeup-credit" name="credit_id">
+                  ${manualMakeupCreditOptions(selectedStudentId, creditId)}
+                </select>
+                <p class="field-hint">Puoi usare anche un recupero segnato come non previsto, oppure crearne uno manuale senza collegarlo a un’assenza.</p>
+              </div>
+              <div class="field field--full">
+                <label for="manual-makeup-mode">Come vuoi programmarlo?</label>
+                <select class="select" id="manual-makeup-mode" name="mode" required>
+                  <option value="group"${defaultMode === "group" ? " selected" : ""}>Inserisci in un gruppo esistente</option>
+                  <option value="individual"${defaultMode === "individual" ? " selected" : ""}>Scegli una data individuale</option>
+                </select>
+              </div>
+              <div class="field field--full" id="manual-makeup-group-fields"${defaultMode === "group" ? "" : " hidden"}>
+                <label for="manual-makeup-target-lesson">Lezione di gruppo</label>
+                <select class="select" id="manual-makeup-target-lesson" name="target_lesson_id"${defaultMode === "group" ? " required" : ""}>
+                  <option value="">Scegli corso, data e ora</option>
+                  ${groupOptions}
+                </select>
+                ${groupOptions ? "" : '<p class="field-hint">Non ci sono lezioni di gruppo future disponibili.</p>'}
+              </div>
+              <div class="field field--full" id="manual-makeup-individual-fields"${defaultMode === "individual" ? "" : " hidden"}>
+                <div class="form-grid">
+                  <div class="field"><label for="manual-makeup-date">Data</label><input class="input" id="manual-makeup-date" name="date" type="date" min="${escapeHTML(todayKey())}" value="${escapeHTML(tomorrow)}"${defaultMode === "individual" ? " required" : ""} /></div>
+                  <div class="field"><label for="manual-makeup-time">Ora</label><input class="input" id="manual-makeup-time" name="time" type="time" value="16:30"${defaultMode === "individual" ? " required" : ""} /></div>
+                  <div class="field"><label for="manual-makeup-duration">Durata (minuti)</label><input class="input" id="manual-makeup-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(selectedEnrollment?.lesson_duration_minutes || selectedCourse?.duration_minutes || 50)}"${defaultMode === "individual" ? " required" : ""} /></div>
+                </div>
+              </div>
+            </div>
+            <div class="info-callout" style="margin-top:18px">${icon("info", 17)}<p>Nell’area privata della famiglia l’appuntamento comparirà nel calendario con l’etichetta <strong>Recupero</strong>.</p></div>
+          </form>
+        `
+        : `<div class="empty-state"><h3>Nessun allievo attivo</h3><p>Per programmare un recupero serve un allievo con un’iscrizione attiva.</p></div>`,
+      footer: activeStudents.length
+        ? `<button class="btn btn--secondary" type="button" data-action="close-modal">Annulla</button><button class="btn btn--primary" type="submit" form="manual-makeup-form">Programma recupero</button>`
+        : `<button class="btn btn--secondary" type="button" data-action="close-modal">Chiudi</button>`,
+    });
+    updateProgramMakeupModal(selectedStudentId, false);
   }
 
   function openEditLessonModal(lessonId) {
@@ -8015,15 +8333,16 @@ if (automaticClosure) {
       "X-WR-TIMEZONE:Europe/Rome",
       ...events.flatMap((lesson) => {
         const course = courseForLesson(lesson);
+        const isMakeup = lessonIsMakeupForStudent(lesson, studentId);
         return [
           "BEGIN:VEVENT",
           `UID:${escapeIcs(lesson.id)}@quartomovimento.it`,
           `DTSTAMP:${icsDate(new Date())}`,
           `DTSTART:${icsDate(lesson.starts_at)}`,
           `DTEND:${icsDate(lesson.ends_at)}`,
-          `SUMMARY:${escapeIcs(lesson.title || course?.name || "Lezione di musica")}`,
+          `SUMMARY:${escapeIcs(isMakeup ? `Recupero · ${lesson.title || course?.name || "Lezione di musica"}` : lesson.title || course?.name || "Lezione di musica")}`,
           `LOCATION:${escapeIcs(lesson.location || course?.location || state.data.settings.school_address || "")}`,
-          `DESCRIPTION:${escapeIcs(LABELS.lessonType[lesson.lesson_type] || "Lezione")}`,
+          `DESCRIPTION:${escapeIcs(isMakeup ? "Recupero" : LABELS.lessonType[lesson.lesson_type] || "Lezione")}`,
           "END:VEVENT",
         ];
       }),
@@ -8320,6 +8639,11 @@ if (automaticClosure) {
       openCancelLessonModal(actionTarget.dataset.lessonId);
     } else if (action === "assign-makeup") {
       openAssignMakeupModal(actionTarget.dataset.creditId);
+    } else if (action === "program-makeup") {
+      openProgramMakeupModal(
+        actionTarget.dataset.creditId || "",
+        actionTarget.dataset.studentId || "",
+      );
     } else if (action === "open-course-modal") {
       openCourseModal();
     } else if (action === "view-course") {
@@ -8685,6 +9009,13 @@ if (automaticClosure) {
         const input = document.getElementById(id);
         if (input) input.required = fixed;
       });
+    } else if (event.target.id === "manual-makeup-student") {
+      updateProgramMakeupModal(event.target.value, true);
+    } else if (event.target.id === "manual-makeup-mode") {
+      updateProgramMakeupModal(
+        document.getElementById("manual-makeup-student")?.value || "",
+        false,
+      );
     } else if (event.target.id === "student-family-id") {
       const family = state.data.families.find(
         (item) => item.id === event.target.value,
@@ -8970,6 +9301,75 @@ if (automaticClosure) {
         toast(
           "Recupero assegnato",
           "La data è ora visibile anche nell’area della famiglia.",
+        );
+      } else if (formId === "manual-makeup-form") {
+        const student = state.data.students.find(
+          (item) => item.id === values.student_id && item.is_active !== false,
+        );
+        const enrollment = enrollmentForStudent(values.student_id);
+        const course = enrollment
+          ? state.data.courses.find((item) => item.id === enrollment.course_id)
+          : null;
+        if (!student || !enrollment || !course) {
+          throw new Error("L’allievo deve avere un’iscrizione attiva.");
+        }
+        if (!values.mode || !["group", "individual"].includes(values.mode)) {
+          throw new Error("Scegli come programmare il recupero.");
+        }
+        let startsAt = null;
+        let targetLesson = null;
+        if (values.mode === "group") {
+          targetLesson = state.data.lessons.find(
+            (lesson) => lesson.id === values.target_lesson_id,
+          );
+          if (
+            !targetLesson ||
+            targetLesson.status !== "scheduled" ||
+            targetLesson.lesson_type !== "regular" ||
+            targetLesson.student_id ||
+            new Date(targetLesson.starts_at) <= new Date()
+          ) {
+            throw new Error("Scegli una lezione di gruppo futura valida.");
+          }
+          if (lessonIsOnSchoolClosure(targetLesson)) {
+            throw new Error("La lezione scelta cade in una giornata di chiusura.");
+          }
+        } else {
+          if (!isIndividualCourse(course)) {
+            throw new Error(
+              "La data individuale è disponibile per gli allievi iscritti a Lezioni individuali.",
+            );
+          }
+          if (schoolClosureForDate(values.date)) {
+            throw new Error("La data scelta è una giornata di chiusura.");
+          }
+          const start = romeDateTime(values.date, values.time);
+          const duration = Number(values.duration_minutes);
+          if (Number.isNaN(start.getTime()) || start <= new Date()) {
+            throw new Error("Scegli una data e un’ora future valide.");
+          }
+          if (!Number.isFinite(duration) || duration < 15 || duration > 240) {
+            throw new Error("La durata deve essere compresa tra 15 e 240 minuti.");
+          }
+          startsAt = start.toISOString();
+        }
+        await state.store.scheduleManualMakeup({
+          student_id: student.id,
+          credit_id: values.credit_id || null,
+          mode: values.mode,
+          target_lesson_id: targetLesson?.id || null,
+          starts_at: startsAt,
+          duration_minutes:
+            values.mode === "individual"
+              ? Number(values.duration_minutes)
+              : null,
+        });
+        const scheduledDate = targetLesson?.starts_at || startsAt;
+        closeModal();
+        await refreshData();
+        toast(
+          "Recupero programmato",
+          `${fullName(student)} lo vedrà nell’area famiglia per ${formatDate(scheduledDate)} alle ${formatTime(scheduledDate)}.`,
         );
       } else if (formId === "cancel-lesson-form") {
         await state.store.updateLessonStatus(
