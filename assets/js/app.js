@@ -3242,6 +3242,125 @@ function schoolClosuresForStudent(studentId) {
       );
     }
 
+    async reconcileCompletedManualMakeups(snapshot) {
+      const lessons = snapshot?.lessons || [];
+      const attendance = snapshot?.attendance || [];
+      const credits = snapshot?.makeupCredits || [];
+      const lessonById = new Map(lessons.map((lesson) => [lesson.id, lesson]));
+      let repaired = 0;
+
+      const manualCredits = credits.filter((credit) => {
+        const lesson = lessonById.get(credit.used_lesson_id);
+        return (
+          credit.status === "used" &&
+          !credit.source_lesson_id &&
+          lesson &&
+          ["makeup", "recovery"].includes(lesson.lesson_type) &&
+          attendance.some(
+            (record) =>
+              record.lesson_id === lesson.id &&
+              record.student_id === credit.student_id &&
+              record.status &&
+              record.status !== "pending",
+          )
+        );
+      });
+
+      for (const manualCredit of manualCredits) {
+        const targetLesson = lessonById.get(manualCredit.used_lesson_id);
+        const targetDate = dateKey(targetLesson.starts_at);
+        const sourceCredit = credits
+          .filter((credit) => {
+            const sourceLesson = lessonById.get(credit.source_lesson_id);
+            return (
+              credit.student_id === manualCredit.student_id &&
+              Boolean(credit.source_lesson_id) &&
+              ["available", "proposed", "not_eligible", "expired"].includes(
+                makeupEffectiveStatus(credit),
+              ) &&
+              sourceLesson &&
+              dateKey(sourceLesson.starts_at) <= targetDate &&
+              (!credit.expires_on || targetDate <= credit.expires_on)
+            );
+          })
+          .sort(
+            (a, b) =>
+              new Date(lessonById.get(b.source_lesson_id).starts_at) -
+              new Date(lessonById.get(a.source_lesson_id).starts_at),
+          )[0];
+        if (!sourceCredit) continue;
+
+        const attendanceRecord = attendance.find(
+          (record) =>
+            record.lesson_id === targetLesson.id &&
+            record.student_id === manualCredit.student_id &&
+            record.status &&
+            record.status !== "pending",
+        );
+        const manualReason = manualCredit.reason || "";
+        const unlinkResult = await this.client
+          .from("makeup_credits")
+          .update({
+            status: "cancelled",
+            used_lesson_id: null,
+            used_at: null,
+            reason: [
+              manualReason,
+              "Sostituito dal credito dell’assenza collegata",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          })
+          .eq("id", manualCredit.id)
+          .eq("status", "used")
+          .select("id")
+          .maybeSingle();
+        if (unlinkResult.error) throw unlinkResult.error;
+        if (!unlinkResult.data) continue;
+
+        const linkResult = await this.client
+          .from("makeup_credits")
+          .update({
+            enrollment_id:
+              sourceCredit.enrollment_id || manualCredit.enrollment_id,
+            used_lesson_id: targetLesson.id,
+            status: "used",
+            used_at:
+              attendanceRecord?.recorded_at ||
+              manualCredit.used_at ||
+              new Date().toISOString(),
+            reason: `Recupero completato il ${targetDate}`,
+          })
+          .eq("id", sourceCredit.id)
+          .select("id")
+          .single();
+        if (linkResult.error) {
+          await this.client
+            .from("makeup_credits")
+            .update({
+              status: "used",
+              used_lesson_id: targetLesson.id,
+              used_at: manualCredit.used_at,
+              reason: manualReason,
+            })
+            .eq("id", manualCredit.id);
+          throw linkResult.error;
+        }
+
+        if (targetLesson.status === "scheduled") {
+          await this.client
+            .from("lessons")
+            .update({ status: "completed" })
+            .eq("id", targetLesson.id)
+            .eq("status", "scheduled");
+        }
+        manualCredit.status = "cancelled";
+        sourceCredit.status = "used";
+        repaired += 1;
+      }
+      return repaired;
+    }
+
     async saveStudent(payload) {
       const { data, error } = await this.client.rpc(
         "admin_upsert_student_family_with_access",
@@ -6873,7 +6992,11 @@ if (automaticClosure) {
     });
   }
 
-  function manualMakeupCreditOptions(studentId, selectedCreditId = "") {
+  function manualMakeupCreditOptions(
+    studentId,
+    selectedCreditId = "",
+    selectSuggestedCredit = false,
+  ) {
     const credits = state.data.makeupCredits
       .filter(
         (credit) =>
@@ -6886,6 +7009,12 @@ if (automaticClosure) {
         (a, b) =>
           new Date(b.created_at || 0) - new Date(a.created_at || 0),
       );
+    const suggestedCreditId = selectSuggestedCredit
+      ? credits.find((credit) =>
+          ["available", "proposed"].includes(makeupEffectiveStatus(credit)),
+        )?.id || credits[0]?.id || ""
+      : "";
+    const activeCreditId = selectedCreditId || suggestedCreditId;
     return [
       `<option value="">Nessuna assenza collegata · crea recupero manuale</option>`,
       ...credits.map((credit) => {
@@ -6898,7 +7027,7 @@ if (automaticClosure) {
         const label = makeupEffectiveStatus(credit) === "expired"
           ? `${baseLabel} · scaduto, solo retroattivo`
           : baseLabel;
-        return `<option value="${escapeHTML(credit.id)}"${credit.id === selectedCreditId ? " selected" : ""}>${escapeHTML(label)}</option>`;
+        return `<option value="${escapeHTML(credit.id)}"${credit.id === activeCreditId ? " selected" : ""}>${escapeHTML(label)}</option>`;
       }),
     ].join("");
   }
@@ -6948,6 +7077,7 @@ if (automaticClosure) {
       creditSelect.innerHTML = manualMakeupCreditOptions(
         studentId,
         currentCreditId,
+        setDefaultMode,
       );
     }
     const modeSelect = document.getElementById("manual-makeup-mode");
@@ -7024,9 +7154,9 @@ if (automaticClosure) {
               <div class="field field--full">
                 <label for="manual-makeup-credit">Assenza/credito da usare</label>
                 <select class="select" id="manual-makeup-credit" name="credit_id">
-                  ${manualMakeupCreditOptions(selectedStudentId, creditId)}
+                  ${manualMakeupCreditOptions(selectedStudentId, creditId, true)}
                 </select>
-                <p class="field-hint">Puoi usare anche un recupero segnato come non previsto, oppure crearne uno manuale senza collegarlo a un’assenza.</p>
+                <p class="field-hint">L’assenza da recuperare viene selezionata automaticamente quando disponibile. Puoi comunque cambiarla o creare un recupero manuale.</p>
               </div>
               <div class="field field--full">
                 <label for="manual-makeup-mode">Come vuoi programmarlo?</label>
@@ -7798,9 +7928,25 @@ if (automaticClosure) {
 
   async function refreshData(render) {
     const preview = state.adminFamilyPreview;
-    const loadedData = await state.store.loadData(
+    let loadedData = await state.store.loadData(
       preview ? ROLE_ADMIN : state.role,
     );
+    if (
+      !preview &&
+      state.role === ROLE_ADMIN &&
+      typeof state.store.reconcileCompletedManualMakeups === "function"
+    ) {
+      try {
+        const repaired = await state.store.reconcileCompletedManualMakeups(
+          loadedData,
+        );
+        if (repaired > 0) {
+          loadedData = await state.store.loadData(ROLE_ADMIN);
+        }
+      } catch (error) {
+        console.warn("Collegamento recuperi completati non riuscito:", error);
+      }
+    }
     if (preview) {
       state.adminDataSnapshot = loadedData;
       state.data = dataForFamilyPreview(loadedData, preview.familyId);
