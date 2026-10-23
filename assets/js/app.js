@@ -1413,7 +1413,9 @@ function schoolClosuresForStudent(studentId) {
   }
 
   function studentAttendanceStats(studentId) {
-    if (!state.data) return { present: 0, absent: 0, total: 0, rate: 0 };
+    if (!state.data) {
+      return { present: 0, absent: 0, recovered: 0, total: 0, rate: 0 };
+    }
     const countableLessonIds = new Set(
       state.data.lessons
         .filter(
@@ -1428,17 +1430,77 @@ function schoolClosuresForStudent(studentId) {
         item.student_id === studentId &&
         countableLessonIds.has(item.lesson_id),
     );
+    const recoveredAbsences = recoveredAbsenceLessonMap(studentId);
     const present = rows.filter((item) => item.status === "present").length;
-    const absent = rows.filter((item) =>
-      ["absent_excused", "absent_unexcused"].includes(item.status),
+    const absent = rows.filter(
+      (item) =>
+        ["absent_excused", "absent_unexcused"].includes(item.status) &&
+        !recoveredAbsences.has(item.lesson_id),
     ).length;
     const total = present + absent;
     return {
       present,
       absent,
+      recovered: recoveredAbsences.size,
       total,
       rate: total ? Math.round((present / total) * 100) : 0,
     };
+  }
+
+  function recoveredAbsenceLessonMap(studentId) {
+    const recovered = new Map();
+    if (!state.data || !studentId) return recovered;
+    const lessonById = new Map(
+      state.data.lessons.map((lesson) => [lesson.id, lesson]),
+    );
+    const studentCredits = state.data.makeupCredits.filter(
+      (credit) => credit.student_id === studentId && credit.status === "used",
+    );
+
+    studentCredits.forEach((credit) => {
+      if (credit.source_lesson_id && credit.used_lesson_id) {
+        recovered.set(credit.source_lesson_id, credit.used_lesson_id);
+      }
+    });
+
+    const unlinkedRecoveries = studentCredits
+      .filter((credit) => {
+        const target = lessonById.get(credit.used_lesson_id);
+        return (
+          !credit.source_lesson_id &&
+          target &&
+          ["makeup", "recovery"].includes(target.lesson_type)
+        );
+      })
+      .sort(
+        (a, b) =>
+          new Date(lessonById.get(a.used_lesson_id).starts_at) -
+          new Date(lessonById.get(b.used_lesson_id).starts_at),
+      );
+    const absences = state.data.attendance
+      .filter(
+        (record) =>
+          record.student_id === studentId &&
+          ["absent_excused", "absent_unexcused"].includes(record.status) &&
+          lessonById.has(record.lesson_id),
+      )
+      .sort(
+        (a, b) =>
+          new Date(lessonById.get(b.lesson_id).starts_at) -
+          new Date(lessonById.get(a.lesson_id).starts_at),
+      );
+
+    unlinkedRecoveries.forEach((credit) => {
+      const target = lessonById.get(credit.used_lesson_id);
+      const source = absences.find(
+        (record) =>
+          !recovered.has(record.lesson_id) &&
+          new Date(lessonById.get(record.lesson_id).starts_at) <=
+            new Date(target.starts_at),
+      );
+      if (source) recovered.set(source.lesson_id, target.id);
+    });
+    return recovered;
   }
 
   function getSelectedStudent() {
@@ -6180,6 +6242,7 @@ function schoolClosuresForStudent(studentId) {
         : "Ciao Valeria, vorrei comunicare un’assenza.",
     );
     const stats = studentAttendanceStats(student?.id);
+    const recoveredAbsences = recoveredAbsenceLessonMap(student?.id);
     const records = state.data.attendance
       .filter((item) => item.student_id === student?.id)
       .map((record) => ({
@@ -6199,10 +6262,14 @@ function schoolClosuresForStudent(studentId) {
           new Date(b.lesson.starts_at) - new Date(a.lesson.starts_at),
       );
     const excused = records.filter(
-      (item) => item.status === "absent_excused",
+      (item) =>
+        item.status === "absent_excused" &&
+        !recoveredAbsences.has(item.lesson_id),
     ).length;
     const unexcused = records.filter(
-      (item) => item.status === "absent_unexcused",
+      (item) =>
+        item.status === "absent_unexcused" &&
+        !recoveredAbsences.has(item.lesson_id),
     ).length;
 
     return `
@@ -6221,6 +6288,7 @@ function schoolClosuresForStudent(studentId) {
               <div class="legend-row"><span class="legend-row__label"><span class="dot" style="background:var(--success)"></span>Presenze</span><strong>${stats.present}</strong></div>
               <div class="legend-row"><span class="legend-row__label"><span class="dot" style="background:var(--warning)"></span>Assenze avvisate</span><strong>${excused}</strong></div>
               <div class="legend-row"><span class="legend-row__label"><span class="dot" style="background:var(--danger)"></span>Non avvisate</span><strong>${unexcused}</strong></div>
+              <div class="legend-row"><span class="legend-row__label"><span class="dot" style="background:var(--brand-aqua)"></span>Assenze recuperate</span><strong>${stats.recovered}</strong></div>
             </div>
           </div>
         </article>
@@ -6244,12 +6312,23 @@ function schoolClosuresForStudent(studentId) {
                 ${records
                   .map((record) => {
                     const isPresent = record.status === "present";
+                    const recoveredLessonId = recoveredAbsences.get(
+                      record.lesson_id,
+                    );
+                    const recoveredLesson = recoveredLessonId
+                      ? state.data.lessons.find(
+                          (lesson) => lesson.id === recoveredLessonId,
+                        )
+                      : null;
+                    const attendanceLabel = recoveredLesson
+                      ? `${LABELS.attendance[record.status] || record.status} · recuperata il ${formatDate(recoveredLesson.starts_at)}`
+                      : LABELS.attendance[record.status] || record.status;
                     return `
                       <div class="timeline-item">
-                        <span class="timeline-dot${isPresent ? "" : " is-absent"}">${isPresent ? "✓" : "–"}</span>
+                        <span class="timeline-dot${isPresent || recoveredLesson ? "" : " is-absent"}">${isPresent || recoveredLesson ? "✓" : "–"}</span>
                         <span class="timeline-copy">
                           <strong>${escapeHTML(record.lesson.title || courseForLesson(record.lesson)?.name || "Lezione")}</strong>
-                          <span>${escapeHTML(LABELS.attendance[record.status] || record.status)}</span>
+                          <span>${escapeHTML(attendanceLabel)}</span>
                         </span>
                         <span class="timeline-date">${escapeHTML(formatDate(record.lesson.starts_at, { day: "numeric", month: "short" }))}</span>
                       </div>
