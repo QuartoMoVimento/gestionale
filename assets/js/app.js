@@ -1124,7 +1124,8 @@ function schoolClosuresForStudent(studentId) {
 
   function enrollmentForLessonStudent(studentId, lesson) {
     const lessonDay = lesson ? dateKey(lesson.starts_at) : todayKey();
-    return enrollmentsForStudent(studentId)
+    const enrollments = enrollmentsForStudent(studentId);
+    const enrollment = enrollments
       .filter(
         (item) =>
           (!lesson || item.course_id === lesson.course_id) &&
@@ -1134,6 +1135,13 @@ function schoolClosuresForStudent(studentId) {
       .sort((a, b) =>
         String(b.starts_on || "").localeCompare(String(a.starts_on || "")),
       )[0];
+    if (enrollment || !lesson) return enrollment;
+    return enrollments.find(
+      (item) =>
+        item.plan_type === "trial" &&
+        item.course_id === lesson.course_id &&
+        singleTrialLessonForEnrollment(item)?.id === lesson.id,
+    );
   }
 
   function recoveryAllowedForEnrollment(enrollment) {
@@ -1326,6 +1334,36 @@ function schoolClosuresForStudent(studentId) {
     );
   }
 
+  function singleTrialLessonForEnrollment(enrollment) {
+    if (!state.data || enrollment?.plan_type !== "trial") return null;
+    const enrollmentDay = dateKey(enrollment.starts_on);
+    const enrollmentDate = toLocalDate(enrollmentDay);
+    return (
+      state.data.lessons
+        .filter(
+          (lesson) =>
+            lesson.course_id === enrollment.course_id &&
+            !lesson.student_id &&
+            !["makeup", "recovery"].includes(lesson.lesson_type) &&
+            !String(lesson.status).startsWith("cancelled") &&
+            !lessonIsOnSchoolClosure(lesson),
+        )
+        .map((lesson) => ({
+          lesson,
+          distance: Math.round(
+            (enrollmentDate - toLocalDate(dateKey(lesson.starts_at))) /
+              86400000,
+          ),
+        }))
+        .filter(({ distance }) => distance >= 0 && distance <= 1)
+        .sort(
+          (a, b) =>
+            a.distance - b.distance ||
+            new Date(a.lesson.starts_at) - new Date(b.lesson.starts_at),
+        )[0]?.lesson || null
+    );
+  }
+
   function studentsForLesson(lesson) {
     if (!state.data) return [];
     const isMakeupSession = ["makeup", "recovery"].includes(
@@ -1337,12 +1375,22 @@ function schoolClosuresForStudent(studentId) {
     } else if (!isMakeupSession) {
       state.data.enrollments
         .filter(
-          (item) =>
-            item.course_id === lesson.course_id &&
-            enrollmentScheduleMode(item) === "course" &&
-            (!item.starts_on || item.starts_on <= dateKey(lesson.starts_at)) &&
-            (!item.ends_on || item.ends_on >= dateKey(lesson.starts_at)) &&
-            (item.is_active !== false || Boolean(item.ends_on)),
+          (item) => {
+            if (
+              item.course_id !== lesson.course_id ||
+              enrollmentScheduleMode(item) !== "course" ||
+              (item.is_active === false && !item.ends_on)
+            ) {
+              return false;
+            }
+            if (item.plan_type === "trial") {
+              return singleTrialLessonForEnrollment(item)?.id === lesson.id;
+            }
+            return (
+              (!item.starts_on || item.starts_on <= dateKey(lesson.starts_at)) &&
+              (!item.ends_on || item.ends_on >= dateKey(lesson.starts_at))
+            );
+          },
         )
         .forEach((item) => studentIds.add(item.student_id));
     }
@@ -1889,6 +1937,18 @@ function schoolClosuresForStudent(studentId) {
     }
 
     async saveAttendance(lessonId, studentId, status, absenceNotifiedAt) {
+      const trialLesson = this.data.lessons.find((item) => item.id === lessonId);
+      const trialEnrollment = this.data.enrollments.find(
+        (item) =>
+          item.student_id === studentId &&
+          item.plan_type === "trial" &&
+          singleTrialLessonForEnrollment(item)?.id === lessonId,
+      );
+      if (trialLesson && trialEnrollment) {
+        const lessonDay = dateKey(trialLesson.starts_at);
+        trialEnrollment.starts_on = lessonDay;
+        trialEnrollment.ends_on = lessonDay;
+      }
       const existing = this.data.attendance.find(
         (item) =>
           item.lesson_id === lessonId && item.student_id === studentId,
@@ -3461,7 +3521,7 @@ function schoolClosuresForStudent(studentId) {
     }
 
     async saveAttendance(lessonId, studentId, status, absenceNotifiedAt) {
-      const rpcResult = await this.client.rpc("mark_attendance_batch", {
+      const attendancePayload = {
         p_lesson_id: lessonId,
         p_entries: [
           {
@@ -3470,8 +3530,39 @@ function schoolClosuresForStudent(studentId) {
             absence_notified_at: absenceNotifiedAt || null,
           },
         ],
-      });
+      };
+      let rpcResult = await this.client.rpc(
+        "mark_attendance_batch",
+        attendancePayload,
+      );
       if (!rpcResult.error) return rpcResult.data;
+      const membershipError =
+        rpcResult.error.code === "23514" &&
+        /non risulta iscritto a questa lezione/i.test(
+          String(rpcResult.error.message || ""),
+        );
+      const lesson = state.data?.lessons.find((item) => item.id === lessonId);
+      const trialEnrollment = state.data?.enrollments.find(
+        (item) =>
+          item.student_id === studentId &&
+          item.plan_type === "trial" &&
+          singleTrialLessonForEnrollment(item)?.id === lessonId,
+      );
+      if (membershipError && lesson && trialEnrollment) {
+        const lessonDay = dateKey(lesson.starts_at);
+        const { error: enrollmentError } = await this.client
+          .from("enrollments")
+          .update({ starts_on: lessonDay, ends_on: lessonDay })
+          .eq("id", trialEnrollment.id);
+        if (enrollmentError) throw enrollmentError;
+        trialEnrollment.starts_on = lessonDay;
+        trialEnrollment.ends_on = lessonDay;
+        rpcResult = await this.client.rpc(
+          "mark_attendance_batch",
+          attendancePayload,
+        );
+        if (!rpcResult.error) return rpcResult.data;
+      }
       if (!/function .* does not exist/i.test(rpcResult.error.message || "")) {
         throw rpcResult.error;
       }
@@ -5928,13 +6019,23 @@ function schoolClosuresForStudent(studentId) {
         }
         if (lesson.student_id) return lesson.student_id === studentId;
         return enrollments.some(
-          (enrollment) =>
-            lesson.course_id === enrollment.course_id &&
-            enrollmentScheduleMode(enrollment) === "course" &&
-            (!enrollment.starts_on ||
-              dateKey(lesson.starts_at) >= enrollment.starts_on) &&
-            (!enrollment.ends_on ||
-              dateKey(lesson.starts_at) <= enrollment.ends_on),
+          (enrollment) => {
+            if (
+              lesson.course_id !== enrollment.course_id ||
+              enrollmentScheduleMode(enrollment) !== "course"
+            ) {
+              return false;
+            }
+            if (enrollment.plan_type === "trial") {
+              return singleTrialLessonForEnrollment(enrollment)?.id === lesson.id;
+            }
+            return (
+              (!enrollment.starts_on ||
+                dateKey(lesson.starts_at) >= enrollment.starts_on) &&
+              (!enrollment.ends_on ||
+                dateKey(lesson.starts_at) <= enrollment.ends_on)
+            );
+          },
         );
       })
       .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
