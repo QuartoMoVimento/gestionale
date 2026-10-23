@@ -152,6 +152,15 @@
         notes: "",
         is_active: true,
       },
+      {
+        id: "stu-6",
+        family_id: "fam-4",
+        first_name: "Leon",
+        last_name: "Trujillo Brandi",
+        birth_date: "2017-05-12",
+        notes: "Recupero individuale completato.",
+        is_active: true,
+      },
     ];
 
     const courses = [
@@ -252,6 +261,16 @@
         ends_on: isoDay(150),
         is_active: true,
       },
+      {
+        id: "enr-6",
+        student_id: "stu-6",
+        course_id: "course-4",
+        plan_type: "annual",
+        starts_on: isoDay(-60),
+        ends_on: isoDay(180),
+        notes: "Recupero individuale disponibile.",
+        is_active: true,
+      },
     ];
 
     const schoolClosures = [
@@ -293,28 +312,44 @@
       ["lesson-24", "course-2", 16, 16, 30, "regular", "scheduled"],
     ];
 
-    const lessons = lessonSpecs
-      .filter(([, , day]) => !schoolClosureDates.has(isoDay(day)))
-      .map(([id, courseId, day, hour, minute, lessonType, status]) => {
-        const course = courses.find((item) => item.id === courseId);
-        const startsAt = localDate(day, hour, minute);
-        const endsAt = new Date(
-          startsAt.getTime() + course.duration_minutes * 60 * 1000,
-        );
-        return {
-          id,
-          course_id: courseId,
-          starts_at: startsAt.toISOString(),
-          ends_at: endsAt.toISOString(),
-          lesson_type: lessonType,
-          status,
-          title: lessonType === "makeup" ? "Recupero di gruppo" : null,
-          location: lessonType === "makeup" ? course.location : null,
-          notes: "",
-          origin: lessonType === "regular" ? "course_schedule" : "manual",
-          occurrence_on: lessonType === "regular" ? isoDay(day) : null,
-        };
-      });
+    const lessons = [
+      ...lessonSpecs
+        .filter(([, , day]) => !schoolClosureDates.has(isoDay(day)))
+        .map(([id, courseId, day, hour, minute, lessonType, status]) => {
+          const course = courses.find((item) => item.id === courseId);
+          const startsAt = localDate(day, hour, minute);
+          const endsAt = new Date(
+            startsAt.getTime() + course.duration_minutes * 60 * 1000,
+          );
+          return {
+            id,
+            course_id: courseId,
+            starts_at: startsAt.toISOString(),
+            ends_at: endsAt.toISOString(),
+            lesson_type: lessonType,
+            status,
+            title: lessonType === "makeup" ? "Recupero di gruppo" : null,
+            location: lessonType === "makeup" ? course.location : null,
+            notes: "",
+            origin: lessonType === "regular" ? "course_schedule" : "manual",
+            occurrence_on: lessonType === "regular" ? isoDay(day) : null,
+          };
+        }),
+      {
+        id: "lesson-25",
+        course_id: "course-4",
+        student_id: "stu-6",
+        starts_at: localDate(-2, 17, 0).toISOString(),
+        ends_at: localDate(-2, 17, 50).toISOString(),
+        lesson_type: "makeup",
+        status: "completed",
+        title: "Lezione individuale di recupero",
+        location: "Studio Quarto MoVimento",
+        notes: "Recupero di Leon Trujillo Brandi.",
+        origin: "manual",
+        occurrence_on: isoDay(-2),
+      },
+    ];
 
     const attendance = [
       ["att-1", "lesson-1", "stu-1", "present"],
@@ -332,6 +367,7 @@
       ["att-13", "lesson-10", "stu-2", "present"],
       ["att-14", "lesson-11", "stu-4", "present"],
       ["att-15", "lesson-12", "stu-5", "present"],
+      ["att-16", "lesson-25", "stu-6", "present"],
     ].map(([id, lessonId, studentId, status]) => ({
       id,
       lesson_id: lessonId,
@@ -503,6 +539,16 @@
         reason: "Recupero concordato",
         expires_on: isoDay(150),
         created_at: isoTime(-18, 18, 0),
+      },
+      {
+        id: "makeup-4",
+        student_id: "stu-6",
+        source_lesson_id: null,
+        used_lesson_id: "lesson-25",
+        status: "used",
+        reason: "Recupero individuale completato",
+        expires_on: isoDay(60),
+        created_at: isoTime(-2, 16, 45),
       },
     ];
 

@@ -2842,8 +2842,20 @@ function schoolClosuresForStudent(studentId) {
       const credit = this.data.makeupCredits.find(
         (item) => item.id === creditId,
       );
-      if (!credit || credit.status !== "available") {
+      if (!credit || !["available", "expired"].includes(credit.status)) {
         throw new Error("Recupero non più disponibile.");
+      }
+      const lesson = this.data.lessons.find(
+        (item) =>
+          item.id === lessonId &&
+          ["scheduled", "completed"].includes(item.status) &&
+          ["makeup", "recovery"].includes(item.lesson_type),
+      );
+      if (
+        !lesson ||
+        (credit.expires_on && dateKey(lesson.starts_at) > credit.expires_on)
+      ) {
+        throw new Error("La sessione di recupero non è compatibile.");
       }
       credit.used_lesson_id = lessonId;
       credit.status = "scheduled";
@@ -2863,13 +2875,28 @@ function schoolClosuresForStudent(studentId) {
         throw new Error("L’allievo non ha un’iscrizione attiva.");
       }
 
+      let credit = payload.credit_id
+        ? this.data.makeupCredits.find(
+            (item) =>
+              item.id === payload.credit_id &&
+              item.student_id === student.id &&
+              ["available", "proposed", "not_eligible", "expired"].includes(
+                makeupEffectiveStatus(item),
+              ),
+          )
+        : null;
+      if (payload.credit_id && !credit) {
+        throw new Error("Il recupero selezionato non è più programmabile.");
+      }
+
       let lesson = null;
       if (payload.mode === "group") {
         lesson = this.data.lessons.find(
           (item) =>
             item.id === payload.target_lesson_id &&
-            item.status === "scheduled" &&
-            new Date(item.starts_at) > new Date(),
+            ["scheduled", "completed"].includes(item.status) &&
+            item.lesson_type === "regular" &&
+            !item.student_id,
         );
         if (!lesson) throw new Error("La lezione di gruppo non è disponibile.");
       } else {
@@ -2891,20 +2918,12 @@ function schoolClosuresForStudent(studentId) {
           origin: "manual",
           occurrence_on: null,
         };
-        this.data.lessons.push(lesson);
       }
 
-      let credit = payload.credit_id
-        ? this.data.makeupCredits.find(
-            (item) =>
-              item.id === payload.credit_id &&
-              item.student_id === student.id &&
-              ["available", "proposed", "not_eligible"].includes(item.status),
-          )
-        : null;
-      if (payload.credit_id && !credit) {
-        throw new Error("Il recupero selezionato non è più programmabile.");
+      if (credit?.expires_on && dateKey(lesson.starts_at) > credit.expires_on) {
+        throw new Error("La data scelta supera la scadenza del recupero.");
       }
+      if (payload.mode === "individual") this.data.lessons.push(lesson);
       if (!credit) {
         credit = {
           id: `makeup-manual-${Date.now()}`,
@@ -5117,7 +5136,7 @@ function schoolClosuresForStudent(studentId) {
         </span>
         <span style="display:flex;align-items:flex-end;flex-direction:column;gap:7px">
           ${statusBadge("makeup", status)}
-          ${["available", "not_eligible", "proposed"].includes(status) ? `<button class="btn btn--primary btn--sm" type="button" data-action="program-makeup" data-credit-id="${escapeHTML(credit.id)}" data-student-id="${escapeHTML(credit.student_id)}">Programma</button>` : ""}
+          ${["available", "not_eligible", "proposed", "expired"].includes(status) ? `<button class="btn btn--primary btn--sm" type="button" data-action="program-makeup" data-credit-id="${escapeHTML(credit.id)}" data-student-id="${escapeHTML(credit.student_id)}">Programma</button>` : ""}
         </span>
       </div>
     `;
@@ -6650,8 +6669,7 @@ if (automaticClosure) {
         (lesson) =>
           lesson.course_id === source?.course_id &&
           ["makeup", "recovery"].includes(lesson.lesson_type) &&
-          lesson.status === "scheduled" &&
-          new Date(lesson.starts_at) > new Date() &&
+          ["scheduled", "completed"].includes(lesson.status) &&
           !lessonIsOnSchoolClosure(lesson) &&
           (!credit.expires_on ||
             dateKey(lesson.starts_at) <= credit.expires_on),
@@ -6679,7 +6697,7 @@ if (automaticClosure) {
                   .join("")}
               </select>
             </div>
-            <div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>L’assegnazione comparirà subito nel calendario della famiglia.</p></div>
+            <div class="info-callout" style="margin-top:16px">${icon("info", 17)}<p>Puoi scegliere anche una sessione già svolta. L’assegnazione comparirà subito nel calendario della famiglia.</p></div>
           </form>
         `
         : `
@@ -6700,7 +6718,7 @@ if (automaticClosure) {
       .filter(
         (credit) =>
           credit.student_id === studentId &&
-          ["available", "proposed", "not_eligible"].includes(
+          ["available", "proposed", "not_eligible", "expired"].includes(
             makeupEffectiveStatus(credit),
           ),
       )
@@ -6714,34 +6732,46 @@ if (automaticClosure) {
         const source = state.data.lessons.find(
           (lesson) => lesson.id === credit.source_lesson_id,
         );
-        const label = source
+        const baseLabel = source
           ? `Assenza del ${formatDate(source.starts_at)} · ${credit.reason || "credito esistente"}`
           : credit.reason || "Recupero esistente";
+        const label = makeupEffectiveStatus(credit) === "expired"
+          ? `${baseLabel} · scaduto, solo retroattivo`
+          : baseLabel;
         return `<option value="${escapeHTML(credit.id)}"${credit.id === selectedCreditId ? " selected" : ""}>${escapeHTML(label)}</option>`;
       }),
     ].join("");
   }
 
   function manualMakeupGroupLessonOptions() {
+    const now = new Date();
     return state.data.lessons
       .filter((lesson) => {
         const course = courseForLesson(lesson);
         return (
-          lesson.status === "scheduled" &&
+          ["scheduled", "completed"].includes(lesson.status) &&
           lesson.lesson_type === "regular" &&
           !lesson.student_id &&
           !isIndividualCourse(course) &&
-          new Date(lesson.starts_at) > new Date() &&
           !lessonIsOnSchoolClosure(lesson)
         );
       })
-      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))
+      .sort((a, b) => {
+        const aDate = new Date(a.starts_at);
+        const bDate = new Date(b.starts_at);
+        const distance = Math.abs(aDate - now) - Math.abs(bDate - now);
+        if (distance !== 0) return distance;
+        return aDate - bDate;
+      })
       .map((lesson) => {
         const course = courseForLesson(lesson);
         const enrolled = studentsForLesson(lesson).length;
         const capacity = Number(course?.capacity || 0);
         const places = capacity ? ` · ${enrolled}/${capacity} allievi` : "";
-        return `<option value="${escapeHTML(lesson.id)}">${escapeHTML(course?.name || "Corso")} · ${escapeHTML(formatDate(lesson.starts_at, { weekday: "short", day: "numeric", month: "long" }))} · ${escapeHTML(formatTime(lesson.starts_at))}${escapeHTML(places)}</option>`;
+        const timing = new Date(lesson.starts_at) <= now
+          ? " · già svolta"
+          : "";
+        return `<option value="${escapeHTML(lesson.id)}">${escapeHTML(course?.name || "Corso")} · ${escapeHTML(formatDate(lesson.starts_at, { weekday: "short", day: "numeric", month: "long" }))} · ${escapeHTML(formatTime(lesson.starts_at))}${escapeHTML(places)}${timing}</option>`;
       })
       .join("");
   }
@@ -6818,7 +6848,7 @@ if (automaticClosure) {
     const groupOptions = manualMakeupGroupLessonOptions();
     openModal({
       title: "Programma recupero",
-      subtitle: "Decidi tu il recupero, anche se il piano non lo prevede automaticamente.",
+      subtitle: "Programma un recupero futuro o registrane uno già svolto.",
       className: "modal--lg",
       body: activeStudents.length
         ? `
@@ -6851,11 +6881,11 @@ if (automaticClosure) {
                   <option value="">Scegli corso, data e ora</option>
                   ${groupOptions}
                 </select>
-                ${groupOptions ? "" : '<p class="field-hint">Non ci sono lezioni di gruppo future disponibili.</p>'}
+                ${groupOptions ? '<p class="field-hint">Sono disponibili anche le lezioni già svolte, indicate nell’elenco.</p>' : '<p class="field-hint">Non ci sono lezioni di gruppo disponibili.</p>'}
               </div>
               <div class="field field--full" id="manual-makeup-individual-fields"${defaultMode === "individual" ? "" : " hidden"}>
                 <div class="form-grid">
-                  <div class="field"><label for="manual-makeup-date">Data</label><input class="input" id="manual-makeup-date" name="date" type="date" min="${escapeHTML(todayKey())}" value="${escapeHTML(tomorrow)}"${defaultMode === "individual" ? " required" : ""} /></div>
+                  <div class="field"><label for="manual-makeup-date">Data</label><input class="input" id="manual-makeup-date" name="date" type="date" value="${escapeHTML(tomorrow)}"${defaultMode === "individual" ? " required" : ""} /><p class="field-hint">Puoi indicare anche una data passata.</p></div>
                   <div class="field"><label for="manual-makeup-time">Ora</label><input class="input" id="manual-makeup-time" name="time" type="time" value="16:30"${defaultMode === "individual" ? " required" : ""} /></div>
                   <div class="field"><label for="manual-makeup-duration">Durata (minuti)</label><input class="input" id="manual-makeup-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(selectedEnrollment?.lesson_duration_minutes || selectedCourse?.duration_minutes || 50)}"${defaultMode === "individual" ? " required" : ""} /></div>
                 </div>
@@ -9324,12 +9354,11 @@ if (automaticClosure) {
           );
           if (
             !targetLesson ||
-            targetLesson.status !== "scheduled" ||
+            !["scheduled", "completed"].includes(targetLesson.status) ||
             targetLesson.lesson_type !== "regular" ||
-            targetLesson.student_id ||
-            new Date(targetLesson.starts_at) <= new Date()
+            targetLesson.student_id
           ) {
-            throw new Error("Scegli una lezione di gruppo futura valida.");
+            throw new Error("Scegli una lezione di gruppo valida.");
           }
           if (lessonIsOnSchoolClosure(targetLesson)) {
             throw new Error("La lezione scelta cade in una giornata di chiusura.");
@@ -9345,8 +9374,8 @@ if (automaticClosure) {
           }
           const start = romeDateTime(values.date, values.time);
           const duration = Number(values.duration_minutes);
-          if (Number.isNaN(start.getTime()) || start <= new Date()) {
-            throw new Error("Scegli una data e un’ora future valide.");
+          if (Number.isNaN(start.getTime())) {
+            throw new Error("Scegli una data e un’ora valide.");
           }
           if (!Number.isFinite(duration) || duration < 15 || duration > 240) {
             throw new Error("La durata deve essere compresa tra 15 e 240 minuti.");
@@ -9369,7 +9398,7 @@ if (automaticClosure) {
         await refreshData();
         toast(
           "Recupero programmato",
-          `${fullName(student)} lo vedrà nell’area famiglia per ${formatDate(scheduledDate)} alle ${formatTime(scheduledDate)}.`,
+          `${fullName(student)} · ${formatDate(scheduledDate)} alle ${formatTime(scheduledDate)}.${new Date(scheduledDate) <= new Date() ? " Ora registra la presenza dalla sezione Presenze per completare il recupero." : ""}`,
         );
       } else if (formId === "cancel-lesson-form") {
         await state.store.updateLessonStatus(
