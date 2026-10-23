@@ -3611,8 +3611,168 @@ function schoolClosuresForStudent(studentId) {
             : null,
         },
       );
-      if (error) throw error;
+      if (error) {
+        const message = String(error.message || "");
+        const isLegacyPastDateRejection =
+          /data futura valida|lezione di gruppo non (?:è|e) disponibile/i.test(
+            message,
+          );
+        if (!isLegacyPastDateRejection) throw error;
+        return this.scheduleRetroactiveManualMakeup(payload);
+      }
       return data;
+    }
+
+    async scheduleRetroactiveManualMakeup(payload) {
+      let createdLessonId = null;
+      let createdCreditId = null;
+      try {
+        const enrollmentResult = await this.client
+          .from("enrollments")
+          .select("*")
+          .eq("student_id", payload.student_id)
+          .eq("is_active", true)
+          .order("starts_on", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (enrollmentResult.error) throw enrollmentResult.error;
+        const enrollment = enrollmentResult.data;
+        if (!enrollment) {
+          throw new Error("L’allievo non ha un’iscrizione attiva.");
+        }
+
+        const [studentResult, courseResult] = await Promise.all([
+          this.client
+            .from("students")
+            .select("*")
+            .eq("id", payload.student_id)
+            .eq("is_active", true)
+            .single(),
+          this.client
+            .from("courses")
+            .select("*")
+            .eq("id", enrollment.course_id)
+            .single(),
+        ]);
+        if (studentResult.error) throw studentResult.error;
+        if (courseResult.error) throw courseResult.error;
+        const student = studentResult.data;
+        const course = courseResult.data;
+
+        let lesson;
+        if (payload.mode === "group") {
+          const lessonResult = await this.client
+            .from("lessons")
+            .select("*")
+            .eq("id", payload.target_lesson_id)
+            .single();
+          if (lessonResult.error) throw lessonResult.error;
+          lesson = lessonResult.data;
+          if (
+            !lesson ||
+            !["scheduled", "completed"].includes(lesson.status) ||
+            lesson.lesson_type !== "regular" ||
+            lesson.student_id
+          ) {
+            throw new Error("La lezione di gruppo non è disponibile.");
+          }
+        } else {
+          const startsAt = new Date(payload.starts_at);
+          const duration = Number(payload.duration_minutes);
+          const lessonResult = await this.client
+            .from("lessons")
+            .insert({
+              course_id: course.id,
+              starts_at: startsAt.toISOString(),
+              ends_at: new Date(
+                startsAt.getTime() + duration * 60000,
+              ).toISOString(),
+              lesson_type: "makeup",
+              status: "scheduled",
+              title: `Recupero individuale · ${student.first_name} ${student.last_name}`,
+              location: course.location || "",
+              notes: "Recupero programmato manualmente",
+              origin: "manual",
+              occurrence_on: null,
+              student_id: null,
+              enrollment_id: null,
+            })
+            .select("*")
+            .single();
+          if (lessonResult.error) throw lessonResult.error;
+          lesson = lessonResult.data;
+          createdLessonId = lesson.id;
+        }
+
+        let credit;
+        if (payload.credit_id) {
+          const creditResult = await this.client
+            .from("makeup_credits")
+            .select("*")
+            .eq("id", payload.credit_id)
+            .eq("student_id", payload.student_id)
+            .single();
+          if (creditResult.error) throw creditResult.error;
+          credit = creditResult.data;
+          if (
+            !["available", "proposed", "not_eligible", "expired"].includes(
+              credit.status,
+            )
+          ) {
+            throw new Error("Il recupero selezionato non è più programmabile.");
+          }
+        } else {
+          const creditResult = await this.client
+            .from("makeup_credits")
+            .insert({
+              student_id: payload.student_id,
+              enrollment_id: enrollment.id,
+              source_lesson_id: null,
+              status: "available",
+              reason: "Recupero aggiunto manualmente da Valeria",
+              expires_on: null,
+            })
+            .select("*")
+            .single();
+          if (creditResult.error) throw creditResult.error;
+          credit = creditResult.data;
+          createdCreditId = credit.id;
+        }
+
+        if (
+          credit.expires_on &&
+          dateKey(lesson.starts_at) > credit.expires_on
+        ) {
+          throw new Error("La data scelta supera la scadenza del recupero.");
+        }
+
+        const updateResult = await this.client
+          .from("makeup_credits")
+          .update({
+            enrollment_id: enrollment.id,
+            used_lesson_id: lesson.id,
+            status: "scheduled",
+            reason: "Recupero programmato manualmente da Valeria",
+            used_at: null,
+          })
+          .eq("id", credit.id)
+          .select("*")
+          .single();
+        if (updateResult.error) throw updateResult.error;
+        return { credit: updateResult.data, lesson };
+      } catch (error) {
+        if (createdCreditId) {
+          await this.client
+            .from("makeup_credits")
+            .delete()
+            .eq("id", createdCreditId);
+        }
+        if (createdLessonId) {
+          await this.client.from("lessons").delete().eq("id", createdLessonId);
+        }
+        throw error;
+      }
     }
 
     async saveSettings(values) {
