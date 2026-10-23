@@ -3613,11 +3613,11 @@ function schoolClosuresForStudent(studentId) {
       );
       if (error) {
         const message = String(error.message || "");
-        const isLegacyPastDateRejection =
-          /data futura valida|lezione di gruppo non (?:è|e) disponibile/i.test(
+        const isLegacyMakeupRestriction =
+          /data futura valida|lezione di gruppo non (?:è|e) disponibile|data individuale (?:è|e) disponibile solo/i.test(
             message,
           );
-        if (!isLegacyPastDateRejection) throw error;
+        if (!isLegacyMakeupRestriction) throw error;
         return this.scheduleRetroactiveManualMakeup(payload);
       }
       return data;
@@ -7045,7 +7045,7 @@ if (automaticClosure) {
               </div>
               <div class="field field--full" id="manual-makeup-individual-fields"${defaultMode === "individual" ? "" : " hidden"}>
                 <div class="form-grid">
-                  <div class="field"><label for="manual-makeup-date">Data</label><input class="input" id="manual-makeup-date" name="date" type="date" value="${escapeHTML(tomorrow)}"${defaultMode === "individual" ? " required" : ""} /><p class="field-hint">Puoi indicare anche una data passata.</p></div>
+                  <div class="field"><label for="manual-makeup-date">Data</label><input class="input" id="manual-makeup-date" name="date" type="date" value="${escapeHTML(tomorrow)}"${defaultMode === "individual" ? " required" : ""} /><p class="field-hint">Puoi indicare anche una data passata, per qualsiasi allievo.</p></div>
                   <div class="field"><label for="manual-makeup-time">Ora</label><input class="input" id="manual-makeup-time" name="time" type="time" value="16:30"${defaultMode === "individual" ? " required" : ""} /></div>
                   <div class="field"><label for="manual-makeup-duration">Durata (minuti)</label><input class="input" id="manual-makeup-duration" name="duration_minutes" type="number" min="15" max="240" step="5" value="${escapeHTML(selectedEnrollment?.lesson_duration_minutes || selectedCourse?.duration_minutes || 50)}"${defaultMode === "individual" ? " required" : ""} /></div>
                 </div>
@@ -9524,11 +9524,6 @@ if (automaticClosure) {
             throw new Error("La lezione scelta cade in una giornata di chiusura.");
           }
         } else {
-          if (!isIndividualCourse(course)) {
-            throw new Error(
-              "La data individuale è disponibile per gli allievi iscritti a Lezioni individuali.",
-            );
-          }
           if (schoolClosureForDate(values.date)) {
             throw new Error("La data scelta è una giornata di chiusura.");
           }

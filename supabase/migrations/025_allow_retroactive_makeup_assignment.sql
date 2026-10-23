@@ -153,10 +153,6 @@ begin
         using errcode = '23514';
     end if;
   else
-    if position('individual' in lower(v_course.name)) = 0 then
-      raise exception 'La data individuale e disponibile solo per Lezioni individuali'
-        using errcode = '23514';
-    end if;
     if p_starts_at is null then
       raise exception 'Scegli una data valida' using errcode = '22023';
     end if;
