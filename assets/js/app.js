@@ -995,12 +995,23 @@ function schoolClosuresForStudent(studentId) {
   function billingPlanMonths(planType) {
     if (planType === "monthly") return 1;
     if (planType === "quarterly") return 3;
+    if (planType === "annual") return 12;
     return 0;
+  }
+
+  function billingRenewalReminderStartsOn(nextStartsOn) {
+    const nextStart = toLocalDate(nextStartsOn);
+    const reminderDate = startOfMonth(nextStart);
+    if (nextStart.getDate() < 20) {
+      reminderDate.setMonth(reminderDate.getMonth() - 1);
+    }
+    reminderDate.setDate(20);
+    return dateKey(reminderDate);
   }
 
   function billingRenewalReminderEntries() {
     if (!state.data || state.role !== ROLE_ADMIN) return [];
-    const horizonKey = dateKey(addDays(todayKey(), 7));
+    const today = todayKey();
     const resolutions = state.data.billingRenewalResolutions || [];
 
     return state.data.enrollments
@@ -1031,7 +1042,8 @@ function schoolClosuresForStudent(studentId) {
             months * cycle,
           );
           const periodEndsOn = addDays(nextStartsOn, -1);
-          if (dateKey(periodEndsOn) > horizonKey) break;
+          const reminderStartsOn = billingRenewalReminderStartsOn(nextStartsOn);
+          if (reminderStartsOn > today) break;
           candidate = {
             enrollment,
             student,
@@ -1041,6 +1053,7 @@ function schoolClosuresForStudent(studentId) {
             periodStartsOn: dateKey(periodStartsOn),
             periodEndsOn: dateKey(periodEndsOn),
             nextStartsOn: dateKey(nextStartsOn),
+            reminderStartsOn,
             nextEndsOn: dateKey(
               addDays(
                 addCalendarMonths(billingAnchor, months * (cycle + 1)),
@@ -1056,7 +1069,15 @@ function schoolClosuresForStudent(studentId) {
             item.enrollment_id === enrollment.id &&
             item.period_ends_on === candidate.periodEndsOn,
         );
-        return resolved ? null : candidate;
+        const matchingInvoice = state.data.invoices.some(
+          (invoice) =>
+            invoice.student_id === student.id &&
+            invoice.status !== "void" &&
+            invoice.due_date === candidate.nextStartsOn &&
+            invoice.title === billingRenewalTitle(candidate) &&
+            invoice.description === billingRenewalDescription(candidate),
+        );
+        return resolved || matchingInvoice ? null : candidate;
       })
       .filter(Boolean)
       .sort((a, b) => {
@@ -1069,7 +1090,10 @@ function schoolClosuresForStudent(studentId) {
     if (entry.enrollment.plan_type === "monthly") {
       return `Mensile ${formatMonth(entry.nextStartsOn)}`;
     }
-    return `Trimestre ${formatDate(entry.nextStartsOn, { month: "short", year: "numeric" })} – ${formatDate(entry.nextEndsOn, { month: "short", year: "numeric" })}`;
+    if (entry.enrollment.plan_type === "quarterly") {
+      return `Trimestre ${formatDate(entry.nextStartsOn, { month: "short", year: "numeric" })} – ${formatDate(entry.nextEndsOn, { month: "short", year: "numeric" })}`;
+    }
+    return `Annuale ${formatDate(entry.nextStartsOn, { year: "numeric" })} – ${formatDate(entry.nextEndsOn, { year: "numeric" })}`;
   }
 
   function billingRenewalDescription(entry) {
@@ -3664,7 +3688,24 @@ function schoolClosuresForStudent(studentId) {
           p_payload: values,
         },
       );
-      if (error) throw error;
+      if (error) {
+        const enrollment = state.data?.enrollments?.find(
+          (item) => item.id === payload.renewal_enrollment_id,
+        );
+        const oldBackendRejectsAnnual =
+          enrollment?.plan_type === "annual" &&
+          error.code === "23514" &&
+          /iscrizione non valida.*promemoria di rinnovo/i.test(
+            String(error.message || ""),
+          );
+        if (!oldBackendRejectsAnnual) throw error;
+
+        const invoice = await this.saveInvoice(payload);
+        return {
+          invoice,
+          period_ends_on: payload.renewal_period_ends_on,
+        };
+      }
       return data;
     }
 
@@ -4514,7 +4555,7 @@ function schoolClosuresForStudent(studentId) {
               <header class="card-header">
                 <div>
                   <h2>Fatture dei rinnovi da preparare</h2>
-                  <p>Mensili e trimestrali vicini alla fine del periodo · gli annuali sono esclusi.</p>
+                  <p>Dal giorno 20, in base al periodo mensile, trimestrale o annuale indicato nella scheda dell’allievo.</p>
                 </div>
                 <span class="badge badge--warning">${billingRenewalReminders.length} ${billingRenewalReminders.length === 1 ? "promemoria" : "promemoria"}</span>
               </header>

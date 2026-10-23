@@ -37,8 +37,8 @@ Area amministrativa:
 - registrazione giornaliera di presenze e assenze;
 - gestione dei crediti di recupero;
 - scadenze, pagamenti, annullamenti tracciati e stato dei saldi;
-- promemoria amministrativi, da sette giorni prima del rinnovo, per preparare
-  le nuove fatture dei piani mensili e trimestrali;
+- promemoria amministrativi, dal giorno 20 che precede ogni rinnovo, per
+  preparare le nuove fatture dei piani mensili, trimestrali e annuali;
 - promemoria interni alle famiglie per gli insoluti da almeno cinque giorni;
 - invito sicuro dei familiari, senza registrazione pubblica.
 
@@ -167,6 +167,9 @@ diventano bonifico, PayPal e contanti e la data in cui il pagamento è avvenuto
 viene registrata su `payments.paid_at` invece di essere sempre quella della
 conferma. Va applicata prima di pubblicare il frontend che invia il nuovo
 parametro `p_paid_at`.
+`023` introduce i promemoria amministrativi dei rinnovi; `027` li estende ai
+piani annuali e mantiene mensili, trimestrali e annuali coerenti con il piano
+salvato nella scheda dell’allievo.
 Non creare manualmente in produzione tabelle o procedure che divergano dalle
 migrazioni.
 
